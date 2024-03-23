@@ -243,7 +243,7 @@ def volatility_analysis(ticker, is_israel_stock, price_data):
 def momentum_analysis(ticker, stock_price_data, fund_data):
     display_log(f"Performing {ticker} momentum factor analysis.")
 
-    currency_code = map_currency_code(extract_currency_code(fund_data))
+    fx_code = map_currency_code(extract_currency_code(fund_data))
 
     stock_price_data_tail = stock_price_data.tail(882)
 
@@ -256,7 +256,20 @@ def momentum_analysis(ticker, stock_price_data, fund_data):
         return ["drop_ticker", "drop_ticker", "drop_ticker", "drop_ticker", "drop_ticker", "drop_ticker", "drop_ticker", "drop_ticker"]
 
     # Check if the stock is traded in Israel. Israel trades on different schedules.
-    is_israel_stock = currency_code == 'ILS'
+    is_israel_stock = fx_code == 'ILS'
+
+    # Get currency data to adjust MACD
+    # GBP is coded as GBX and ILS is coded as ILA for some reason.
+    fx_code = "GBP" if fx_code == "GBX" else fx_code
+    fx_code = "ILS" if fx_code == "ILA" else fx_code
+
+    # Get the exchange rate for the currency if it's not already in the list.
+    if fx_code not in forex_code_list:
+        forex_code_list.append(fx_code)
+        fx_rate = get_timeseries_data(fx_code + ".FOREX", token)["Adjusted_close"].tail(1)
+        forex_rate_list.append(fx_rate)
+    else:
+        fx_rate = forex_rate_list[forex_code_list.index(fx_code)]
 
     try:
         volatility_data = volatility_analysis(ticker, is_israel_stock, stock_price_data_tail)
@@ -273,9 +286,10 @@ def momentum_analysis(ticker, stock_price_data, fund_data):
 
         rsi = ta.momentum.RSIIndicator(stock_price_data_tail["Adjusted_close"]).rsi().tail(1).to_list()[-1]
         macd = ta.trend.MACD(stock_price_data_tail["Adjusted_close"])
-        macd_line = macd.macd().tail(1).to_list()[-1]
-        macd_signal = macd.macd_signal().tail(1).to_list()[-1]
-        macd_spread = macd.macd_diff().tail(1).to_list()[-1]
+
+        macd_line = macd.macd().tail(1).to_list()[-1] / fx_rate.to_list()[-1]
+        macd_signal = macd.macd_signal().tail(1).to_list()[-1]  / fx_rate.to_list()[-1]
+        macd_spread = macd.macd_diff().tail(1).to_list()[-1]  / fx_rate.to_list()[-1]
         sma200 = ta.trend.SMAIndicator(stock_price_data_tail["Adjusted_close"], 200, fillna = True).sma_indicator().tail(1).to_list()[-1]
 
     except Exception as e:
@@ -343,10 +357,10 @@ def compile_data():
     data_table["12M Vol fct"] = y3_vol_list
     data_table["Stop Vol fct"] = stop_vol_list
 
-    data_table["RSI"] = rsi_list
+    data_table["RSI fct"] = rsi_list
     data_table["MACD Line"] = macd_line_list
     data_table["MACD Signal"] = macd_signal_list
-    data_table["MACD Hist"] = macd_spread_list
+    data_table["MACD Hist fct"] = macd_spread_list
     data_table["SMA 200"] = sma200_list
     
     return data_table
@@ -394,7 +408,7 @@ def fix_sectors(data_table):
 # These factors do not need to be normalized, simply winsorized.
 def standardize_simple_scores(data_table):
     display_log("Standardizing simple scores...")
-    simple_factors = ["Momentum fct"]
+    simple_factors = ["Momentum fct", "RSI fct", "MACD Hist fct"]
 
     scores = [(data_table[factor].astype(float) - np.nanmean(data_table[factor].astype(float))) / np.nanstd(data_table[factor].astype(float)) for factor in simple_factors]
     winsorized_scores = [winsorize_scores(score) for score in scores]
@@ -406,6 +420,7 @@ def standardize_simple_scores(data_table):
     
 
 def multifactor_scores(data_table):
+    data_table["Reversal Score"] = (data_table["RSI Z-Scores"] + data_table["MACD Hist Z-Scores"]) * 0.05
     data_table["Trailing Amt"] = data_table["Stop Vol fct"] * 100
     data_table["Stop Px"] = data_table["Price"] - (data_table["Stop Vol fct"] * data_table["Price"])
     data_table["Limit Offset"] = (data_table["Price"] - (data_table["Stop Vol fct"] * data_table["Price"])) * 0.005
