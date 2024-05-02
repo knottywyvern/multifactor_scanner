@@ -32,6 +32,7 @@ eod_list = []
 country_list = []
 sector_list = []
 industry_list = []
+institutional_holders_list = []
 momentum_list = []
 momentum_1mo_list = []
 y3_vol_list = []
@@ -187,18 +188,21 @@ def get_general_data(ticker, fund_data):
 
     try:
         general_data = json.loads(fund_data.decode("utf-8")).get("General", {})
+        share_data = json.loads(fund_data.decode("utf-8")).get("SharesStats", {})
         stock_name = general_data["Name"]
         country_name = general_data["CountryName"]
         sector_name = general_data.get("Sector", "Other")
         industry_name = general_data.get("Industry", "Other")
+        institutional_holders = share_data["PercentInstitutions"]
     except (KeyError, json.decoder.JSONDecodeError) as e:
         logging.debug(f"Error: {e}")
         stock_name = "drop_ticker"
         country_name = "drop_ticker"
         sector_name = "Other"
         industry_name = "Other"
+        institutional_holders = 0
 
-    return [stock_name, country_name, sector_name, industry_name]
+    return [stock_name, country_name, sector_name, industry_name, institutional_holders]
 
 
 def extract_currency_code(fund_data):
@@ -313,6 +317,7 @@ def factor_analysis():
         country_list.append(general_data_var[1])
         sector_list.append(general_data_var[2])
         industry_list.append(general_data_var[3])
+        institutional_holders_list.append(general_data_var[4])
         
         # Momentum
         momentum_list.append(momentum_data_var[0])
@@ -341,6 +346,7 @@ def compile_data():
     data_table["Country Name"] = country_list
     data_table["Sector"] = sector_list
     data_table["Industry"] = industry_list
+    data_table["Insitutional Holders"] = institutional_holders_list
 
     data_table["Momentum fct"] = momentum_list
 
