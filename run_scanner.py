@@ -40,20 +40,17 @@ stop_vol_list = []
 stop_px_list = []
 trailing_amt_list = []
 offset_list = []
-rsi_list = []
-macd_line_list = []
-macd_signal_list = []
-macd_spread_list = []
 isolated_ticker = []
-sma200_list = []
+primary_exchange_list = []
+currency_code_list = []
 
 
 # Check if we need to be using dev settings.
 def is_dev_mode():
     if os.getcwd()[-3:] == "dev":
-        logging.basicConfig(filename="log.txt", level=logging.DEBUG)
+        logging.basicConfig(filename="scannerlog.txt", level=logging.DEBUG)
     else:
-        logging.basicConfig(filename="log.txt", level=logging.INFO)
+        logging.basicConfig(filename="scannerlog.txt", level=logging.INFO)
 
 
 # Save and display log lines
@@ -125,6 +122,23 @@ def get_timeseries_data(ticker, token):
     grab_start_date = timeseries_start_date.strftime("%Y-%m-%d")
     url = f"https://eodhistoricaldata.com/api/eod/{ticker}?from={grab_start_date}&api_token={token}"
     return pd.read_csv(io.StringIO(canada_check(url, ticker).decode("utf-8")))
+
+
+def get_riskfree_rate(token):
+    index_file = "parameters/riskfree_rate.txt"
+    if os.path.exists(index_file):
+        with open(index_file) as f:
+            rfr_ticker = f.read()
+        display_log(f"Getting {rfr_ticker} timeseries data.")
+        grab_start_date = timeseries_start_date.strftime("%Y-%m-%d")
+        url = f"https://eodhistoricaldata.com/api/eod/{rfr_ticker}?from={grab_start_date}&api_token={token}"
+        rfr_df = pd.read_csv(io.StringIO(canada_check(url, rfr_ticker).decode("utf-8")))
+        rfr_df = rfr_df["Adjusted_close"].tolist()
+        rfr = rfr_df[-1] / rfr_df[-252]
+    else:
+        rfr = 0
+
+    return rfr
     
 
 def get_ticker_list(marketIndex, token):
@@ -188,21 +202,32 @@ def get_general_data(ticker, fund_data):
 
     try:
         general_data = json.loads(fund_data.decode("utf-8")).get("General", {})
-        share_data = json.loads(fund_data.decode("utf-8")).get("SharesStats", {})
         stock_name = general_data["Name"]
         country_name = general_data["CountryName"]
         sector_name = general_data.get("Sector", "Other")
         industry_name = general_data.get("Industry", "Other")
-        institutional_holders = share_data["PercentInstitutions"]
+        primary_exchange = general_data.get("Exchange", "Other")
+        if primary_exchange == "NASDAQ":
+            primary_exchange = "ISLAND"
+        elif primary_exchange == "NYSE ARCA":
+            primary_exchange = "ARCA"
+        currency_code = general_data["CurrencyCode"]
     except (KeyError, json.decoder.JSONDecodeError) as e:
         logging.debug(f"Error: {e}")
         stock_name = "drop_ticker"
         country_name = "drop_ticker"
         sector_name = "Other"
         industry_name = "Other"
+        primary_exchange = "drop_ticker"
+        currency_code = "drop_ticker"
+
+    try:
+        share_data = json.loads(fund_data.decode("utf-8")).get("SharesStats", {})
+        institutional_holders = share_data["PercentInstitutions"]
+    except (KeyError, json.decoder.JSONDecodeError) as e:
         institutional_holders = 0
 
-    return [stock_name, country_name, sector_name, industry_name, institutional_holders]
+    return [stock_name, country_name, sector_name, industry_name, institutional_holders, primary_exchange, currency_code]
 
 
 def extract_currency_code(fund_data):
@@ -244,7 +269,7 @@ def volatility_analysis(ticker, is_israel_stock, price_data):
     return volatility_momentum, volatility_stop
 
 
-def momentum_analysis(ticker, stock_price_data, fund_data):
+def momentum_analysis(ticker, stock_price_data, fund_data, riskfree_rate):
     display_log(f"Performing {ticker} momentum factor analysis.")
 
     fx_code = map_currency_code(extract_currency_code(fund_data))
@@ -257,7 +282,7 @@ def momentum_analysis(ticker, stock_price_data, fund_data):
     # Tickers listed for less than 1 year do not have enough data for momentum trading.
     if len(stock_price_data_tail) <= 147:
         display_log(f"{ticker} does not have enough timeseries data for momentum analysis. It has been marked to drop.")
-        return ["drop_ticker", "drop_ticker", "drop_ticker", "drop_ticker", "drop_ticker", "drop_ticker", "drop_ticker", "drop_ticker"]
+        return ["drop_ticker", "drop_ticker", "drop_ticker"]
 
     # Check if the stock is traded in Israel. Israel trades on different schedules.
     is_israel_stock = fx_code == 'ILS'
@@ -274,23 +299,15 @@ def momentum_analysis(ticker, stock_price_data, fund_data):
         while len(stock_price_data_list) < 1260:
             stock_price_data_list.insert(0, stock_price_data_list[0])
 
-        momentum_12_month = ((stock_price_data_list[-21] / stock_price_data_list[-273]) - 1) / volatility_3y
-        momentum_6_month = ((stock_price_data_list[-21] / stock_price_data_list[-147]) - 1) / volatility_3y
+        momentum_12_month = ((stock_price_data_list[-21] / stock_price_data_list[-273]) - riskfree_rate) / volatility_3y
+        momentum_6_month = ((stock_price_data_list[-21] / stock_price_data_list[-147]) - riskfree_rate) / volatility_3y
         momentum_returns = (momentum_12_month + momentum_6_month)/2
-
-        rsi = ta.momentum.RSIIndicator(stock_price_data_tail["Adjusted_close"]).rsi().tail(1).to_list()[-1]
-        macd = ta.trend.MACD(stock_price_data_tail["Adjusted_close"])
-
-        macd_line = macd.macd().tail(1).to_list()[-1] / stock_price_data_list[-1]
-        macd_signal = macd.macd_signal().tail(1).to_list()[-1]  / stock_price_data_list[-1]
-        macd_spread = macd.macd_diff().tail(1).to_list()[-1]  / stock_price_data_list[-1]
-        sma200 = ta.trend.SMAIndicator(stock_price_data_tail["Adjusted_close"], 200, fillna = True).sma_indicator().tail(1).to_list()[-1]
 
     except Exception as e:
         logging.error(f"Error analyzing momentum for {ticker}: {e}")
-        return ["drop_ticker", "drop_ticker", "drop_ticker", "drop_ticker", "drop_ticker", "drop_ticker", "drop_ticker", "drop_ticker"]
+        return ["drop_ticker", "drop_ticker", "drop_ticker"]
 
-    return [momentum_returns, volatility_3y, volatility_stop, rsi, macd_line, macd_signal, macd_spread, sma200]
+    return [momentum_returns, volatility_3y, volatility_stop]
 
 
 # Run all our factor analysis at once.
@@ -309,7 +326,7 @@ def factor_analysis():
             master_ticker_list[master_ticker_list.index(ticker)] = ticker_code + ".TO"
 
         general_data_var = get_general_data(ticker, fund_data)
-        momentum_data_var = momentum_analysis(ticker, eod_data, fund_data)
+        momentum_data_var = momentum_analysis(ticker, eod_data, fund_data, rfr)
         
         # General Data
         name_list.append(general_data_var[0])
@@ -318,6 +335,8 @@ def factor_analysis():
         sector_list.append(general_data_var[2])
         industry_list.append(general_data_var[3])
         institutional_holders_list.append(general_data_var[4])
+        primary_exchange_list.append(general_data_var[5])
+        currency_code_list.append(general_data_var[6])
         
         # Momentum
         momentum_list.append(momentum_data_var[0])
@@ -325,13 +344,6 @@ def factor_analysis():
         # Volatility
         y3_vol_list.append(momentum_data_var[1])
         stop_vol_list.append(momentum_data_var[2])
-
-        # Trading Indicators
-        rsi_list.append(momentum_data_var[3])
-        macd_line_list.append(momentum_data_var[4])
-        macd_signal_list.append(momentum_data_var[5])
-        macd_spread_list.append(momentum_data_var[6])
-        sma200_list.append(momentum_data_var[7])
         
     
 # Compile data for reading
@@ -346,18 +358,14 @@ def compile_data():
     data_table["Country Name"] = country_list
     data_table["Sector"] = sector_list
     data_table["Industry"] = industry_list
-    data_table["Insitutional Holders"] = institutional_holders_list
 
+    data_table["Institutional Holders fct"] = institutional_holders_list
     data_table["Momentum fct"] = momentum_list
 
     data_table["12M Vol fct"] = y3_vol_list
     data_table["Stop Vol fct"] = stop_vol_list
-
-    data_table["RSI fct"] = rsi_list
-    data_table["MACD Line"] = macd_line_list
-    data_table["MACD Signal"] = macd_signal_list
-    data_table["MACD Hist fct"] = macd_spread_list
-    data_table["SMA 200"] = sma200_list
+    data_table["PrimaryExchange"] = primary_exchange_list
+    data_table["Currency"] = currency_code_list
     
     return data_table
 
@@ -404,7 +412,7 @@ def fix_sectors(data_table):
 # These factors do not need to be normalized, simply winsorized.
 def standardize_simple_scores(data_table):
     display_log("Standardizing simple scores...")
-    simple_factors = ["Momentum fct", "RSI fct", "MACD Hist fct"]
+    simple_factors = ["Institutional Holders fct", "Momentum fct"]
 
     scores = [(data_table[factor].astype(float) - np.nanmean(data_table[factor].astype(float))) / np.nanstd(data_table[factor].astype(float)) for factor in simple_factors]
     winsorized_scores = [winsorize_scores(score) for score in scores]
@@ -416,13 +424,13 @@ def standardize_simple_scores(data_table):
     
 
 def multifactor_scores(data_table):
-    data_table["Reversal Score"] = (data_table["RSI Z-Scores"] + data_table["MACD Hist Z-Scores"]) * 0.05
+    data_table["Squeeze Score"] = (data_table["Institutional Holders Z-Scores"] + data_table["Momentum Z-Scores"]) * 0.5
     data_table["Trailing Amt"] = data_table["Stop Vol fct"] * 100
     data_table["Stop Px"] = data_table["Price"] - (data_table["Stop Vol fct"] * data_table["Price"])
     data_table["Limit Offset"] = (data_table["Price"] - (data_table["Stop Vol fct"] * data_table["Price"])) * 0.005
 
     cols = data_table.columns.tolist()
-    important_columns = ["Ticker IBKR", "Trailing Amt", "Stop Px", "Limit Offset"]
+    important_columns = ["Ticker IBKR", "Currency", "PrimaryExchange", "Trailing Amt", "Stop Px", "Limit Offset"]
     cols = [column_name for column_name in cols if column_name not in important_columns]
     cols.extend(important_columns)
     data_table = data_table[cols]
@@ -438,6 +446,7 @@ api_key = licenseFile.read()
 token = api_key
 
 display_log("Grabbing indicies data.")
+rfr = get_riskfree_rate(token)
 
 master_ticker_list, isolated_ticker = get_ticker_list(get_indices(), token)
 
@@ -457,5 +466,6 @@ fundamental_data_table = standardize_simple_scores(fundamental_data_table)
 fundamental_data_table = multifactor_scores(fundamental_data_table)
 
 fundamental_data_table.to_csv("output/" + current_date.strftime("%Y%m%d") + ".csv", index = False, header = True)
+fundamental_data_table.to_csv("output/output.csv", index = False, header = True)
 
 display_log("[" + str(dt.datetime.now()) + "] " + "Script duration " + str((dt.datetime.now() - script_start_time)))
