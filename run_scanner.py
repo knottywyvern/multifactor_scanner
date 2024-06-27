@@ -10,61 +10,43 @@ import json
 import numpy as np
 import math
 import ta as ta
+import statsmodels.api as sm
 
-# Elapsed time it took for the script to run.
+# Initialize script start time and calculate timeseries start date
 script_start_time = dt.datetime.now()
-
-# Hard coded parameters.
-master_ticker_list = []
 current_date = dt.datetime.today()
-
 timeseries_days_lookback = 882 # 3.5 year look back. Length determined by amount of data needed to calculate momentum.
 timeseries_start_date = current_date - dt.timedelta(days = timeseries_days_lookback)
 
+# Hard coded parameters.
+master_ticker_list = []
+
 # Risk-free rate variables.
-forex_code_list = []
-forex_rate_list = []
+forex_code_list, forex_rate_list = [], []
 
 # Factor variables.
-new_ticker_list = []
-name_list = []
-eod_list = []
-country_list = []
-sector_list = []
-industry_list = []
-institutional_holders_list = []
-momentum_list = []
-momentum_1mo_list = []
-market_cycle_list = []
-y3_vol_list = []
-market_cap_list = []
-rvol_list = []
-max_roc_list = []
-dvol_list = []
-turn_list = []
-ill_list = []
-stop_vol_list = []
-stop_px_list = []
-trailing_amt_list = []
-offset_list = []
-isolated_ticker = []
-primary_exchange_list = []
-currency_code_list = []
+new_ticker_list, name_list, eod_list = [], [], []
+country_list, sector_list, industry_list = [], [], []
+institutional_holders_list, momentum_list, momentum_1mo_list = [], [], []
+market_cycle_list, y3_vol_list, market_cap_list = [], [], []
+rvol_list, max_roc_list, dvol_list = [], [], []
+turn_list, ill_list, stop_vol_list = [], [], []
+r_list = []
+stop_px_list, trailing_amt_list, offset_list = [], [], []
+isolated_ticker, primary_exchange_list, currency_code_list = [], [], []
 
 
 # Check if we need to be using dev settings.
 def is_dev_mode():
-    if os.getcwd()[-3:] == "dev":
-        logging.basicConfig(filename="scannerlog.txt", level=logging.DEBUG)
-    else:
-        logging.basicConfig(filename="scannerlog.txt", level=logging.INFO)
+    logging_level = logging.DEBUG if os.getcwd().endswith("dev") else logging.INFO
+    logging.basicConfig(filename="logs/scannerlog.txt", level=logging_level)
 
 
 # Save and display log lines
 def display_log(string):
     logging.info(string)
     print(string)
-    
+
 
 # Creating sessions to reduce API calls .   
 def create_session():
@@ -93,16 +75,14 @@ def get_indices():
     return index_inclusion_list
 
 
+# Canadia tickers have a unique format.
 def canada_check(url, ticker):
     session = create_session()
     if ticker.endswith('.TO'):
         url_un = url.replace(ticker, ticker[:-3] + "-UN.TO")
         response = session.get(url_un).content
-        if response.decode("utf-8") == "Ticker Not Found." or "Symbol not found":
+        if response.decode("utf-8") in ["Ticker Not Found.", "Symbol not found"]:
             response = session.get(url).content
-            return response
-        else:
-            return response
     else:
         response = session.get(url).content
         return response
@@ -128,113 +108,117 @@ def get_timeseries_data(ticker, token):
     display_log(f"Getting {ticker} timeseries data.")
     grab_start_date = timeseries_start_date.strftime("%Y-%m-%d")
     url = f"https://eodhistoricaldata.com/api/eod/{ticker}?from={grab_start_date}&api_token={token}"
-    timeseries_df = pd.read_csv(io.StringIO(canada_check(url, ticker).decode("utf-8")))
+    
+    response_content = canada_check(url, ticker)
+
+    if response_content is None:
+        display_log(f"No data returned for {ticker}.")
+        return None
     try:
+        timeseries_df = pd.read_csv(io.StringIO(response_content.decode("utf-8")))
         timeseries_df["ROC"] = timeseries_df["Adjusted_close"].pct_change()
     except Exception as e:
-        display_log(f"Error occured while processing {ticker}: {e}")
-        timeseries_df = None
+        display_log(f"Error occurred while processing {ticker}: {e}")
+        return None
+    
     return timeseries_df
 
 
-def save_riskfree_rate_to_csv(dataframe):
-    dataframe.to_csv("regions_data.csv", index = False)
-
-
-def get_riskfree_rate(region_data):
-    logging.info("Getting risk-free rates.")
-    rate_dataframe = get_riskfree_rate_from_website(region_data)
-    if rate_dataframe is not None:
-        save_riskfree_rate_to_csv(rate_dataframe)
-    else:
-        rate_dataframe = region_data
-    return rate_dataframe
+def save_dataframe_to_csv(dataframe, filename="regions_data.csv"):
+    dataframe.to_csv(filename, index=False)
 
 
 def fetch_website_data(url):
-    response = requests.get(url)
-    if response.status_code == 200:
+    try:
+        response = requests.get(url)
+        response.raise_for_status()  # Raise HTTPError for bad responses
         return pd.read_html(response.content)[0]
-    else:
-        raise ConnectionError("Failed to fetch website data")
+    except requests.exceptions.RequestException as e:
+        raise ConnectionError(f"Failed to fetch website data: {e}")
 
 
 def extract_riskfree_rates(table, benchmark):
+    table = table.replace({"United Kingdom": "UK", "United States": "USA"})
     rfr_list = []
 
     for country in benchmark["Country"]:
-        row = table.loc[table["Country▴"] == country]["Central Bank Rate"]
-        rate = row.astype("str").tolist()[0]
-        rate = float(rate[:-2]) / 100
-        rfr_list.append(rate)
+        try:
+            rate_str = table.loc[table["Country▴"] == country, "Central Bank Rate"].values[0]
+            rate = float(rate_str[:-2]) / 100  # Convert percentage string to float
+            rfr_list.append(rate)
+        except IndexError:
+            logging.warning(f"Rate not found for country: {country}")
+            rfr_list.append(None)
 
     return rfr_list
 
 
 def get_riskfree_rate_from_website(region_data):
+    website_url = "http://www.worldgovernmentbonds.com/central-bank-rates/"
     try:
-        website_url = "http://www.worldgovernmentbonds.com/central-bank-rates/"
         table_dataframe = fetch_website_data(website_url)
-
-        table_dataframe = table_dataframe.replace("United Kingdom", "UK")
-        table_dataframe = table_dataframe.replace("United States", "USA")
-
-        benchmark_dataframe = region_data
-
-        rfr_list = extract_riskfree_rates(table_dataframe, benchmark_dataframe)
-        
-        benchmark_dataframe["Rate"] = rfr_list
-        
-        return benchmark_dataframe
+        rfr_list = extract_riskfree_rates(table_dataframe, region_data)
+        region_data["Rate"] = rfr_list
+        return region_data
     except (ValueError, ConnectionError) as e:
-        print(f"Error fetching risk-free rate data: {e}")
+        logging.error(f"Error fetching risk-free rate data: {e}")
         return None
-    
 
-def get_ticker_list(marketIndex, token):
-    ticker_list = []
 
-    inclusion_file = "parameters/ticker_inclusion.txt"
-    exclusion_file = "parameters/ticker_exclusion.txt"
+def get_riskfree_rate(region_data):
+    display_log("Getting risk-free rates.")
+    rate_dataframe = get_riskfree_rate_from_website(region_data)
+    if rate_dataframe is not None:
+        save_dataframe_to_csv(rate_dataframe)
+    else:
+        rate_dataframe = region_data
+    return rate_dataframe
 
-    # Add tickers from market index
-    for ticker in marketIndex:
+
+def get_ticker_list(market_index, token):
+    ticker_list = set()
+
+    ticker_list.update(fetch_tickers_from_market_index(market_index, token))
+    ticker_list.update(load_tickers_from_file("parameters/ticker_inclusion.txt", "Including specific tickers;"))
+
+    ticker_list = normalize_ticker_format(ticker_list)
+
+    # Remove tickers that the users do not want to analyze.
+    ticker_list.difference_update(load_tickers_from_file("parameters/ticker_exclusion.txt", "Excluding specific tickers;"))
+
+    ticker_ex_exchange = [ticker.split(".", 1)[0] for ticker in ticker_list]
+    return list(ticker_list), ticker_ex_exchange
+
+
+def fetch_tickers_from_market_index(market_index, token):
+    ticker_list = set()
+    for ticker in market_index:
         try:
             response = get_fundamental_data(ticker, token)
             if response:
-                table_dataframe = pd.read_json(response.decode('utf8'), orient = "index")
-                ticker_list += list(pd.DataFrame.from_dict(table_dataframe["Holdings"].iloc[2], orient = "index").index.values)
+                table_dataframe = pd.read_json(response.decode('utf8'), orient="index")
+                holdings = table_dataframe["Holdings"].iloc[2]
+                ticker_list.update(pd.DataFrame.from_dict(holdings, orient="index").index.values)
         except Exception as e:
-            display_log(f"Error occured while processing {ticker}: {e}")
+            display_log(f"Error occurred while processing {ticker}: {e}")
+    return ticker_list
 
-    # Add tickers that the users want that are not part of the index that is being referenced.
-    if os.path.exists(inclusion_file):
-        display_log("Including specific tickers;")
-        with open(inclusion_file) as f:
-            ticker_inclusion_list = [x.strip() for x in f.readlines() if x.strip() != ""]
-            ticker_list += ticker_inclusion_list
-            display_log(ticker_inclusion_list)
 
-    # Tickers like ERIC B.ST are not returning the correct ticker data.
-    ticker_list = list(set(ticker_list))
-    ticker_list = [ticker.replace(' ', '-') for ticker in ticker_list]
+def load_tickers_from_file(file_path, log_message):
+    tickers = set()
+    if os.path.exists(file_path):
+        display_log(log_message)
+        with open(file_path) as f:
+            tickers = {x.strip() for x in f.readlines() if x.strip()}
+            display_log(list(tickers))
+    return tickers
 
-    # Tickers like FAE/D.MC? Why does our vendor list tickers like this?
-    ticker_list = [ticker.replace('/', '-') for ticker in ticker_list]
 
-    # Remove tickers that the users do not want to analyze.
-    if os.path.exists(exclusion_file):
-        display_log("Excluding specific tickers;")
-        with open(exclusion_file) as f:
-            ticker_exclusion_list = [x.strip() for x in f.readlines() if x.strip() != ""]
-            for ticker in ticker_exclusion_list:
-                if ticker in ticker_list:
-                    ticker_list.remove(ticker)
-            display_log(ticker_exclusion_list)
-
-    ticker_ex_exchange = [ticker.split(".", 1)[0] for ticker in ticker_list]
-
-    return ticker_list, ticker_ex_exchange
+# Tickers like ERIC B.ST are not returning the correct ticker data.
+# Tickers like FAE/D.MC? Why does our vendor list tickers like this?
+def normalize_ticker_format(ticker_list):
+    """Normalize the format of tickers by replacing spaces and slashes with dashes."""
+    return {ticker.replace(' ', '-').replace('/', '-') for ticker in ticker_list}
 
 
 def price_last_close(ticker, stock_price_data):
@@ -249,45 +233,56 @@ def price_last_close(ticker, stock_price_data):
 
 # Getting non-numerical data of the ticker.
 def get_general_data(ticker, fund_data):
+    """Fetch general stock data for the given ticker from the provided fundamental data."""
     display_log(f"Getting general {ticker} stock data.")
+    fund_data_dict = load_json_data(fund_data)
 
-    try:
-        general_data = json.loads(fund_data.decode("utf-8")).get("General", {})
-        stock_name = general_data["Name"]
-        country_name = general_data["CountryName"]
-        sector_name = general_data.get("Sector", "Other")
-        industry_name = general_data.get("Industry", "Other")
-        primary_exchange = general_data.get("Exchange", "Other")
-        if primary_exchange == "NASDAQ":
-            primary_exchange = "ISLAND"
-        elif primary_exchange == "NYSE ARCA":
-            primary_exchange = "ARCA"
-        currency_code = general_data["CurrencyCode"]
-    except (KeyError, json.decoder.JSONDecodeError) as e:
-        logging.debug(f"Error: {e}")
-        stock_name = "drop_ticker"
-        country_name = "drop_ticker"
-        sector_name = "Other"
-        industry_name = "Other"
-        primary_exchange = "drop_ticker"
-        currency_code = "drop_ticker"
+    general_data = fund_data_dict.get("General", {})
+    stock_name = general_data.get("Name", "drop_ticker")
+    country_name = general_data.get("CountryName", "drop_ticker")
+    sector_name = general_data.get("Sector", "Other")
+    industry_name = general_data.get("Industry", "Other")
+    primary_exchange = map_primary_exchange(general_data.get("Exchange", "Other"))
+    currency_code = general_data.get("CurrencyCode", "drop_ticker")
 
-    try:
-        share_data = json.loads(fund_data.decode("utf-8")).get("SharesStats", {})
-        institutional_holders = share_data["PercentInstitutions"]
-    except (KeyError, json.decoder.JSONDecodeError) as e:
-        institutional_holders = 0
+    share_data = fund_data_dict.get("SharesStats", {})
+    institutional_holders = share_data.get("PercentInstitutions", 0)
 
     return [stock_name, country_name, sector_name, industry_name, institutional_holders, primary_exchange, currency_code]
 
 
+def load_json_data(fund_data):
+    if fund_data is None:
+        logging.debug("Received NoneType data")
+        return {}
+    
+    try:
+        return json.loads(fund_data.decode("utf-8"))
+    except (json.JSONDecodeError, AttributeError) as e:
+        logging.debug(f"Error decoding JSON data: {e}")
+        return {}
+
+
+def map_primary_exchange(exchange):
+    exchange_mapping = {
+        "NYSE ARCA": "ARCA",
+        "NYSE MKT": "AMEX"
+    }
+    return exchange_mapping.get(exchange, exchange)
+
+
 def extract_currency_code(fund_data):
-    return json.loads(fund_data.decode("utf-8")).get("General", {}).get("CurrencyCode", "USD")
+    fund_data_dict = load_json_data(fund_data)
+    return fund_data_dict.get("General", {}).get("CurrencyCode", "USD")
 
 
 # GBP is coded as GBX and ILS is coded as ILA for some reason.
 def map_currency_code(code):
-    return "GBP" if code == "GBX" else "ILS" if code == "ILA" else code
+    currency_mapping = {
+        "GBX": "GBP",
+        "ILA": "ILS"
+    }
+    return currency_mapping.get(code, code)
 
 
 def date_string_to_datetime(dataframe):
@@ -299,7 +294,8 @@ def date_string_to_datetime(dataframe):
 
 
 def extract_weekly_returns(is_israel_stock, price_data):
-    weekly = price_data[price_data["Date"].dt.weekday == 3] if is_israel_stock else price_data[price_data["Date"].dt.weekday == 4]
+    weekday = 3 if is_israel_stock else 4
+    weekly = price_data[price_data["Date"].dt.weekday == weekday]
     weekly_returns = (weekly["Adjusted_close"].shift(-1) / weekly["Adjusted_close"]) - 1
     return weekly_returns[:-1]
 
@@ -312,7 +308,6 @@ def volatility_analysis(ticker, is_israel_stock, price_data):
     display_log(f"Performing {ticker} volatility factor analysis...")
 
     weekly_returns = extract_weekly_returns(is_israel_stock, price_data)
-
     volatility_momentum = calculate_volatility(weekly_returns.tail(156))
 
     month_prior = price_data["Adjusted_close"][:-21].tail(21).to_list()
@@ -324,14 +319,11 @@ def volatility_analysis(ticker, is_israel_stock, price_data):
 def calculate_momentum(stock_prices, riskfree_rate, volatility_3y):
     try:
         # Calculate 12-month momentum
-        momentum_12_month = (((stock_prices[-21] / stock_prices[-273]) - 1) - riskfree_rate) / volatility_3y
-        
+        momentum_12_month = (((stock_prices[-21] / stock_prices[-252]) - 1) - riskfree_rate) / volatility_3y
         # Calculate 6-month momentum
-        momentum_6_month = (((stock_prices[-21] / stock_prices[-147]) - 1) - riskfree_rate) / volatility_3y
-        
+        momentum_6_month = (((stock_prices[-21] / stock_prices[-126]) - 1) - riskfree_rate) / volatility_3y
         # Calculate average momentum returns
         momentum_returns = (momentum_12_month + momentum_6_month) / 2
-        
         # Calculate 1-month momentum
         momentum_1_month = ((stock_prices[-1] / stock_prices[-21]) - 1)
         
@@ -343,7 +335,7 @@ def calculate_momentum(stock_prices, riskfree_rate, volatility_3y):
 
 def momentum_analysis(ticker, stock_price_data, fund_data, riskfree_rate_table):
     display_log(f"Performing {ticker} momentum factor analysis...")
-    subfactors = 6
+    subfactors = 5
     drop_ticker = "drop_ticker"
     try:
         fx_code = map_currency_code(extract_currency_code(fund_data))
@@ -362,28 +354,35 @@ def momentum_analysis(ticker, stock_price_data, fund_data, riskfree_rate_table):
         
         is_israel_stock = fx_code == 'ILS'
 
-        volatility_data = volatility_analysis(ticker, is_israel_stock, stock_prices_tail)
-        volatility_3y, volatility_stop = volatility_data
+        volatility_3y, volatility_stop = volatility_analysis(ticker, is_israel_stock, stock_prices_tail)
         
         stock_prices_list = stock_prices_tail["Adjusted_close"].tolist()
         while len(stock_prices_list) < 1260:
             stock_prices_list.insert(0, stock_prices_list[0])
         
         momentum_returns, momentum_1_month = calculate_momentum(stock_prices_list, riskfree_rate, volatility_3y)
-        top_roc = stock_prices_tail["ROC"].tail(21).nlargest(5)
-        max_roc = top_roc.mean()
-        if momentum_returns > 0 and momentum_1_month > 0:
-            mom_cycle = 1
-        elif momentum_returns < 0 and momentum_1_month > 0:
-            mom_cycle = 0.5
-        else:
-            mom_cycle = 0
+        max_roc = stock_prices_tail["ROC"].tail(21).nlargest(10).mean()
         
-        return [momentum_returns, volatility_3y, volatility_stop, momentum_1_month, max_roc, mom_cycle]
+        return [momentum_returns, volatility_3y, volatility_stop, momentum_1_month, max_roc]
     
     except Exception as e:
         display_log(f"Error analyzing momentum for {ticker}: {e}")
         return [drop_ticker for subfactor in range(subfactors)]
+    
+
+def trend_analysis(ticker, stock_price_data):
+    display_log(f"Performing {ticker} trend analysis...")
+    try:
+        stock_price_data = stock_price_data.tail(252)
+        stock_price_data["time"] = np.arange(len(stock_price_data))
+        X = sm.add_constant(stock_price_data["time"])
+        model = sm.OLS(stock_price_data["Adjusted_close"], X).fit()
+        r_squared = model.rsquared
+
+        return r_squared
+    except Exception as e:
+        display_log(f"Error analyzing trend clarity for {ticker}: {e}")
+        return "drop_ticker"
 
 
 def adjust_forex(fx_code):
@@ -414,7 +413,8 @@ def size_analysis(ticker, fund_data):
         elif general_data["Type"] == "FUND":
             mf_data = json.loads(fund_data).get("MutualFund_Data", {})
             market_cap = mf_data.get("Portfolio_Net_Assets", {})
-        elif general_data["Type"] == "Common Stock":
+        #elif general_data["Type"] == "Common Stock":
+        else:
             market_cap = fund_data_dict.get("Highlights", {}).get("MarketCapitalization")
 
     except Exception as e:
@@ -431,21 +431,19 @@ def size_analysis(ticker, fund_data):
     return market_cap_log_normalized
 
 
-def vix_table(region_data):
-    vol_index_dict = dict.fromkeys(set(region_data["Vol Index"].tolist()))
-    for index in vol_index_dict:
-        vol_index_dict[index] = get_timeseries_data(index, token).tail(252)
-        vol_index_dict[index]["Var"] = np.nanvar(vol_index_dict[index]["ROC"])
+def vix_table(region_data, token):
+    vol_index_dict = {}
+    for index in set(region_data["Vol Index"]):
+        timeseries_data = get_timeseries_data(index, token).tail(252)
+        timeseries_data["Var"] = np.nanvar(timeseries_data["ROC"])
+        vol_index_dict[index] = timeseries_data
     
     return vol_index_dict
 
 
 def compile_to_region_data(region_data, vix_tables):
-    vol_index_table = []
-    for index in region_data["Vol Index"]:
-        vol_index_table.append(vix_tables[index])
+    return [vix_tables[index] for index in region_data["Vol Index"]]
 
-    return vol_index_table
 
 # We should try and see if we can seperate taking in region data since we will need
 # the function for calculating market beta anyways and writing a second function
@@ -459,6 +457,7 @@ def calculate_return_volatility(ticker, stock_price_data, fund_data, region_data
 
         if country_name is None:
             raise ValueError("CountryName not found in fund_data.")
+        
         index_number = region_data.index[region_data["Country"] == country_name].tolist()
 
         if not index_number:
@@ -467,275 +466,290 @@ def calculate_return_volatility(ticker, stock_price_data, fund_data, region_data
         vol_roc = region_data["Vol Table"][index_number[0]]["ROC"]
         vol_var = region_data["Vol Table"][index_number[0]]["Var"]
 
-        stock_prices_tail = stock_price_data.tail(252)
-        stock_roc = stock_prices_tail["ROC"].tail(252)
-        stock_roc_clean = stock_roc.dropna()
+        stock_roc = stock_price_data["ROC"].tail(252).dropna()
         vol_roc_clean = vol_roc.dropna()
-        covariance = np.cov(stock_roc_clean, vol_roc_clean)[0, 1]
+
+        covariance = np.cov(stock_roc, vol_roc_clean)[0, 1]
         beta = covariance / vol_var
+
+        return beta.tolist()[-1]
         
     except Exception as e:
         display_log(f"Error analyzing return volatility for {ticker}: {e}")
         return "drop_ticker"
 
-    return beta.tolist()[-1]
+
+def calculate_dollar_volume(prices, volumes, fx_code):
+    per_day_dvol = [close * vol for close, vol in zip(prices, volumes)]
+    fx_rate = adjust_forex(fx_code)
+    dvol = (sum(per_day_dvol[-42:-21]) / fx_rate / 1000000).tolist()[-0]
+    display_log(f"Calculated Dollar Volume: {dvol}")
+    return dvol
+
+
+def calculate_illiquidity_ratio(returns, per_day_dvol):
+    per_day_ret_ratio = [roc / dvol for roc, dvol in zip(returns, per_day_dvol)]
+    ill = (sum(per_day_ret_ratio) / 252) * 1000000000
+    display_log(f"Calculated Illiquidity Ratio: {ill}")
+    return ill
+
+
+def calculate_turnover(general_data, volume, fund_data):
+    if general_data.get("Type") in ["ETF", "FUND"]:
+        return 1
+    elif general_data.get("Type") == "Common Stock":
+        shares_outstanding = json.loads(fund_data).get("SharesStats", {}).get("SharesOutstanding")
+        if shares_outstanding:
+            turnover = sum(volume) / len(volume) / shares_outstanding
+            display_log(f"Calculated Turnover: {turnover}")
+            return turnover
+    return "drop_ticker"
 
 
 def liquidity_analysis(ticker, stock_price_data, fund_data):
     display_log(f"Performing {ticker} liquidity analysis...")
-    per_day_dvol = []
-    general_data = json.loads(fund_data).get("General", {})
+
+    if not fund_data:
+        display_log(f"No fund data available for {ticker}. Returning drop_ticker values.")
+        return ["drop_ticker", "drop_ticker", "drop_ticker"]
 
     try:
         fx_code = map_currency_code(extract_currency_code(fund_data))
-        fx_code = "ILS" if fx_code == "ILA" else fx_code
-
         stock_prices_tail = stock_price_data.tail(252)
+
         prices = stock_prices_tail["Adjusted_close"].tolist()
-        volume = stock_prices_tail["Volume"].tolist()
+        volumes = stock_prices_tail["Volume"].tolist()
         returns = stock_prices_tail["ROC"].tolist()
 
-        per_day_dvol = [close * vol for close, vol in zip(prices, volume)]
-        per_day_ret_ratio = [roc / dvol for roc, dvol in zip(returns, per_day_dvol)]
-        # Divided sum by a million to make numbers more readable for debugging.
-        dvol = (sum(per_day_dvol[-42:-21]) / adjust_forex(fx_code) / 1000000).tolist()[0]
-        ill = (sum(per_day_ret_ratio) / 252) * 1000000000
-    
-    except Exception as e:
-        display_log(f"Error analyzing dollor volume for {ticker}: {e}")
-        dvol = "drop_ticker"
-        ill = "drop_ticker"
+        if len(prices) < 252 or len(volumes) < 252 or len(returns) < 252:
+            raise ValueError("Insufficient data for liquidity analysis.")
 
-    try:
-        if general_data["Type"] == "ETF" or general_data["Type"] == "FUND":
-            turnover = 1
-        elif general_data["Type"] == "Common Stock":
-            shares_outstanding = json.loads(fund_data).get("SharesStats", {})["SharesOutstanding"]
-
-            turnover = sum(volume) / len(volume) / shares_outstanding  
+        per_day_dvol = [close * vol for close, vol in zip(prices, volumes)]
         
+        dvol = calculate_dollar_volume(prices, volumes, fx_code)
+        ill = calculate_illiquidity_ratio(returns, per_day_dvol)
+        general_data = json.loads(fund_data).get("General", {})
+        turnover = calculate_turnover(general_data, volumes, fund_data)
+
+        return [dvol, turnover, ill]
+
     except Exception as e:
-        display_log(f"Error analyzing turnover for {ticker}: {e}")
-        turnover = "drop_ticker"
-
-    return [dvol, turnover, ill]
+        display_log(f"Unexpected error in liquidity analysis for {ticker}: {e}")
+        return ["drop_ticker", "drop_ticker", "drop_ticker"]
 
 
-# Run all our factor analysis at once.
+# Fix for REITs and Trust units in Canada is causing bad data to be gathered
+def get_ticker_code(fund_data, ticker):
+    try:
+        ticker_code = json.loads(fund_data.decode("utf-8"))["General"]["Code"]
+        if ticker_code not in ticker and ".TO" in ticker:
+            return ticker_code + ".TO"
+    except Exception as e:
+        display_log(f"Error getting ticker code: {e}")
+    return ticker
+
+
+def append_general_data(ticker, fund_data, eod_data):
+    general_data_var = get_general_data(ticker, fund_data)
+    name_list.append(general_data_var[0])
+    eod_list.append(price_last_close(ticker, eod_data))
+    country_list.append(general_data_var[1])
+    sector_list.append(general_data_var[2])
+    industry_list.append(general_data_var[3])
+    institutional_holders_list.append(general_data_var[4])
+    primary_exchange_list.append(general_data_var[5])
+    currency_code_list.append(general_data_var[6])
+
+
+def append_momentum_data(ticker, eod_data, fund_data):
+    momentum_data_var = momentum_analysis(ticker, eod_data, fund_data, riskfree_rate_table)
+    momentum_list.append(momentum_data_var[0])
+    momentum_1mo_list.append(momentum_data_var[3])
+    max_roc_list.append(momentum_data_var[4])
+    y3_vol_list.append(momentum_data_var[1])
+    stop_vol_list.append(momentum_data_var[2])
+
+
+def append_size_data(ticker, fund_data):
+    size_data_var = size_analysis(ticker, fund_data)
+    market_cap_list.append(size_data_var)
+
+
+def append_volatility_data(ticker, eod_data, fund_data, region_data):
+    rvol_data_var = calculate_return_volatility(ticker, eod_data, fund_data, region_data)
+    rvol_list.append(rvol_data_var)
+
+
+def append_liquidity_data(ticker, eod_data, fund_data):
+    liquidity_var = liquidity_analysis(ticker, eod_data, fund_data)
+    dvol_list.append(liquidity_var[0])
+    turn_list.append(liquidity_var[1])
+    ill_list.append(liquidity_var[2])
+
+
+def append_trend_data(ticker, eod_data):
+    r_list.append(trend_analysis(ticker, eod_data))
+
+
 def factor_analysis():
     for ticker in master_ticker_list:
         display_log(f"Performing factor analysis on {ticker}.")
         fund_data = get_fundamental_data(ticker, token)
         eod_data = get_timeseries_data(ticker, token)
-        
-        # Fix for REITs and Trust units in Canada is causing bad data to be gathered
-        try:
-            ticker_code = json.loads(fund_data.decode("utf-8"))["General"]["Code"]
-        except:
-            pass
-        if ticker_code not in ticker and ".TO" in ticker:
-            master_ticker_list[master_ticker_list.index(ticker)] = ticker_code + ".TO"
 
-        general_data_var = get_general_data(ticker, fund_data)
-        momentum_data_var = momentum_analysis(ticker, eod_data, fund_data, riskfree_rate_table)
-        size_data_var = size_analysis(ticker, fund_data)
-        rvol_data_var = calculate_return_volatility(ticker, eod_data, fund_data, region_data)
-        liquidity_var = liquidity_analysis(ticker, eod_data, fund_data)
-                
-        # General Data
-        name_list.append(general_data_var[0])
-        eod_list.append(price_last_close(ticker, eod_data))
-        country_list.append(general_data_var[1])
-        sector_list.append(general_data_var[2])
-        industry_list.append(general_data_var[3])
-        institutional_holders_list.append(general_data_var[4])
-        primary_exchange_list.append(general_data_var[5])
-        currency_code_list.append(general_data_var[6])
-        
-        # Momentum
-        momentum_list.append(momentum_data_var[0])
-        momentum_1mo_list.append(momentum_data_var[3])
-        max_roc_list.append(momentum_data_var[4])
-        market_cycle_list.append(momentum_data_var[5])
+        ticker = get_ticker_code(fund_data, ticker)
+        append_general_data(ticker, fund_data, eod_data)
+        append_momentum_data(ticker, eod_data, fund_data)
+        append_size_data(ticker, fund_data)
+        append_volatility_data(ticker, eod_data, fund_data, region_data)
+        append_liquidity_data(ticker, eod_data, fund_data)
+        append_trend_data(ticker, eod_data)
 
-        # Size
-        market_cap_list.append(size_data_var)
-        
-        # Volatility
-        y3_vol_list.append(momentum_data_var[1])
-        stop_vol_list.append(momentum_data_var[2])
-        rvol_list.append(rvol_data_var)
 
-        # Liquidity
-        dvol_list.append(liquidity_var[0])
-        turn_list.append(liquidity_var[1])
-        ill_list.append(liquidity_var[2])
-
-    
-# Compile data for reading
 def compile_data():
     display_log("Compiling data...")
-    
-    data_table = pd.DataFrame()
-    data_table["Ticker"] = master_ticker_list
-    data_table["Ticker IBKR"] = isolated_ticker
-    data_table["Name"] = name_list
-    data_table["Price"] = eod_list
-    data_table["Country Name"] = country_list
-    data_table["Sector"] = sector_list
-    data_table["Industry"] = industry_list
+    data_table = pd.DataFrame({
+        "Ticker": master_ticker_list,
+        "Ticker IBKR": isolated_ticker,
+        "Name": name_list,
+        "Price": eod_list,
+        "Country Name": country_list,
+        "Sector": sector_list,
+        "Industry": industry_list,
+        "Institutional Holders fct": institutional_holders_list,
+        "Momentum fct": momentum_list,
+        "1Month fct": momentum_1mo_list,
+        "Max ROC raw": max_roc_list,
+        "12M Vol fct": y3_vol_list,
+        "Stop Vol fct": stop_vol_list,
+        "Size raw": market_cap_list,
+        "Return Volatility fct": rvol_list,
+        "Dollar Volume fct": dvol_list,
+        "Turnover fct": turn_list,
+        "Illiquidity fct": ill_list,
+        "Trend Clarity fct": r_list,
+        "PrimaryExchange": primary_exchange_list,
+        "Currency": currency_code_list
+    })
 
-    data_table["Institutional Holders fct"] = institutional_holders_list
-    data_table["Momentum fct"] = momentum_list
-    data_table["1Month fct"] = momentum_1mo_list
-    data_table["Max ROC raw"] = max_roc_list
-    data_table["Cycle fct"] = market_cycle_list
-
-    data_table["12M Vol fct"] = y3_vol_list
-    data_table["Stop Vol fct"] = stop_vol_list
-
-    data_table["Size raw"] = market_cap_list
     numeric_size = pd.to_numeric(data_table["Size raw"], errors="coerce")
     numeric_sum = numeric_size.sum()
     data_table["Size fct"] = numeric_size / numeric_sum
-    data_table["Return Volatility fct"] = rvol_list
 
-    data_table["Dollar Volume fct"] = dvol_list
-    data_table["Turnover fct"] = turn_list
-    data_table["Illiquidity fct"] = ill_list
-
-    data_table["PrimaryExchange"] = primary_exchange_list
-    data_table["Currency"] = currency_code_list
-    
     return data_table
 
 
 # We need a list of rejected tickers for full analysis and checking of false negatives.
 def output_rejected_tickers():
     display_log("Outputting rejected tickers. These can be found in rejected_tickers.txt.")
-    
-    rejected_data_table = fundamental_data_table[(fundamental_data_table.iloc[:, 1:].isin(["drop_ticker"]).any(axis = 1))]
+    rejected_data_table = fundamental_data_table[
+        (fundamental_data_table.iloc[:, 1:].isin(["drop_ticker"]).any(axis=1))
+    ]
     rejected_tickers = rejected_data_table["Ticker"]
+
     with open('output/rejected_tickers.txt', 'w') as f:
-        for ticker in list(rejected_tickers):
+        for ticker in rejected_tickers:
             f.write("%s\n" % ticker)
-            
+
 
 def winsorize_scores(scores):
     upper_bound = 3.0
     lower_bound = -3.0
-    
-    winsorized_scores = [score if lower_bound <= score <= upper_bound else upper_bound if score > upper_bound else lower_bound for score in scores]
-    
-    return winsorized_scores
+    return np.clip(scores, lower_bound, upper_bound)
 
 
 # There are several sectors that are not labled correctly from the data source.
 def fix_sectors(data_table):
-    proper_sectors = ["Basic Materials",
-                      "Communication Services",
-                      "Consumer Cyclical",
+    proper_sectors = ["Basic Materials", 
+                      "Communication Services", 
+                      "Consumer Cyclical", 
                       "Consumer Defensive",
-                      "Energy",
-                      "Financial Services",
-                      "Healthcare",
-                      "Industrials",
-                      "Real Estate",
+                      "Energy", 
+                      "Financial Services", 
+                      "Healthcare", 
+                      "Industrials", 
+                      "Real Estate", 
                       "Technology",
-                      "Utilities",
+                      "Utilities", 
                       "Other"]
-    new_data_table = data_table[data_table["Sector"].isin(proper_sectors)]
-    
-    return new_data_table
+    return data_table[data_table["Sector"].isin(proper_sectors)]
 
 
 def scale_values(values, target_min, target_max):
-    min_value = min(values)
-    max_value = max(values)
-
-    scaled_values = [(value - min_value) / (max_value - min_value) * (target_max - target_min) + target_min
-                     for value in values]
-
-    return scaled_values
+    min_value = values.min()
+    max_value = values.max()
+    return (values - min_value) / (max_value - min_value) * (target_max - target_min) + target_min
 
 
 # These factors do not need to be normalized, simply winsorized.
 def standardize_simple_scores(data_table):
     display_log("Standardizing simple scores...")
-    simple_factors = ["Institutional Holders fct",
-                        "Momentum fct", 
-                        "1Month fct", 
-                        "Size fct",
-                        "Return Volatility fct",
-                        "Dollar Volume fct",
-                        "Turnover fct"]
-
-    scores = [(data_table[factor].astype(float) - np.nanmean(data_table[factor].astype(float))) / np.nanstd(data_table[factor].astype(float)) for factor in simple_factors]
-    winsorized_scores = [winsorize_scores(score) for score in scores]
-    
-    for i, factor in enumerate(simple_factors):
-        display_log(f"Calculating {factor} Z-Scores...")
-        data_table[factor[:-3] + "Z-Scores"] = winsorized_scores[i]
-
+    simple_factors = ["Institutional Holders fct", 
+                      "Momentum fct", 
+                      "1Month fct", 
+                      "Size fct", 
+                      "Return Volatility fct",
+                      "Dollar Volume fct", 
+                      "Turnover fct",
+                      "Trend Clarity fct"]
+    for factor in simple_factors:
+        data_table[factor[:-3] + "Z-Scores"] = winsorize_scores(
+            (data_table[factor].astype(float) - data_table[factor].astype(float).mean()) /
+            data_table[factor].astype(float).std())
     return data_table
-    
 
+    
 def scores_post_processing(data_table):
-    data_table["Trailing Amt"] = data_table["Stop Vol fct"] * 100    
+    data_table["Trailing Amt"] = data_table["Stop Vol fct"] * 100
     data_table["1Month Reversal fct"] = data_table["1Month fct"] * scale_values(data_table["Turnover Z-Scores"], -1, 1)
     data_table["1Month Reversal Z-Scores"] = scale_values(data_table["1Month Reversal fct"], -3, 3)
-    data_table["Max ROC fct"] = [1 / abs(value - data_table["Max ROC raw"].mean().tolist()) for value in data_table["Max ROC raw"]]
+    data_table["Max ROC fct"] = 1 / abs(data_table["Max ROC raw"].mean() - data_table["Max ROC raw"])
     data_table["Max ROC Z-Scores"] = scale_values(data_table["Max ROC fct"], -3, 3)
-    data_table["Return Volatility Z-Scores"] = data_table["Return Volatility Z-Scores"] * -1
-    data_table["Turnover Z-Scores"] = data_table["Turnover Z-Scores"] * -1
-    data_table["Illiquidity Z-Scores"] = data_table["Illiquidity fct"] * -1 * scale_values(data_table["Size fct"], -1, 1)
+    data_table["Return Volatility Z-Scores"] *= -1
+    data_table["Turnover Z-Scores"] *= -1
+    data_table["Illiquidity Z-Scores"] = data_table["Illiquidity fct"] * -1 * \
+                                         scale_values(data_table["Size fct"], -1, 1)
     data_table["Illiquidity Z-Scores"] = scale_values(data_table["Illiquidity Z-Scores"], -3, 3)
-
     data_table["Stop Px"] = data_table["Price"] - (data_table["Stop Vol fct"] * data_table["Price"])
     data_table["Limit Offset"] = (data_table["Price"] - (data_table["Stop Vol fct"] * data_table["Price"])) * 0.005
 
-    cols = data_table.columns.tolist()
     important_columns = ["Ticker IBKR", "Currency", "PrimaryExchange", "Trailing Amt", "Stop Px", "Limit Offset"]
-    cols = [column_name for column_name in cols if column_name not in important_columns]
-    cols.extend(important_columns)
-    data_table = data_table[cols]
+    return data_table[[col for col in data_table.columns if col not in important_columns] + important_columns]
 
-    return data_table
+if __name__ == "__main__":
+    dev_mode = is_dev_mode()
 
+    # API key for authentication
+    licenseFile = open("licenseFile.key", "r")
+    api_key = licenseFile.read()
+    region_data = pd.read_csv("regions_data.csv")
+    token = api_key
 
-dev_mode = is_dev_mode()
+    display_log("Grabbing indicies data...")
+    master_ticker_list, isolated_ticker = get_ticker_list(get_indices(), token)
 
-# API key for authentication
-licenseFile = open("licenseFile.key", "r")
-api_key = licenseFile.read()
-region_data = pd.read_csv("regions_data.csv")
-token = api_key
+    display_log("Grabbing riskfree rates...")
+    riskfree_rate_table = get_riskfree_rate(region_data)
 
-display_log("Grabbing indicies data...")
-master_ticker_list, isolated_ticker = get_ticker_list(get_indices(), token)
+    display_log("Grabbing VIX tables...")
+    region_data["Vol Table"] = compile_to_region_data(region_data, vix_table(region_data, token))
 
-display_log("Grabbing riskfree rates...")
-riskfree_rate_table = get_riskfree_rate(region_data)
+    factor_analysis()
+    fundamental_data_table = compile_data()
+    output_rejected_tickers()
+    fundamental_data_table.to_csv("output/" + current_date.strftime("%Y%m%d") + "dump.csv", index=False, header=True)
+    #fundamental_data_table = pd.read_csv('20221107dump.csv')
+    fundamental_data_table = fix_sectors(fundamental_data_table)
 
-display_log("Grabbing VIX tables...")
-region_data["Vol Table"] = compile_to_region_data(region_data, vix_table(region_data))
+    # THE SQUIGGLY IS NOT A TYPO
+    fundamental_data_table = fundamental_data_table[~fundamental_data_table.isin(["drop_ticker"]).any(axis=1)]
+    fundamental_data_table = fundamental_data_table.reset_index(drop=True)
 
-factor_analysis()
-fundamental_data_table = compile_data()
-output_rejected_tickers()
-fundamental_data_table.to_csv("output/" + current_date.strftime("%Y%m%d") + "dump.csv", index = False, header = True)
-#fundamental_data_table = pd.read_csv('20221107dump.csv')
-fundamental_data_table = fix_sectors(fundamental_data_table)
+    # These are ordered this way specifically to make it easier to read the output spreadsheet.
+    fundamental_data_table = standardize_simple_scores(fundamental_data_table)
+    fundamental_data_table = scores_post_processing(fundamental_data_table)
 
-# THE SQUIGGLY IS NOT A TYPO
-fundamental_data_table = fundamental_data_table[~fundamental_data_table.isin(["drop_ticker"]).any(axis=1)]
-fundamental_data_table = fundamental_data_table.reset_index(drop=True)
+    fundamental_data_table.to_csv("output/" + current_date.strftime("%Y%m%d") + ".csv", index = False, header = True)
+    fundamental_data_table.to_csv("output/output.csv", index = False, header = True)
 
-# These are ordered this way specifically to make it easier to read the output spreadsheet.
-fundamental_data_table = standardize_simple_scores(fundamental_data_table)
-fundamental_data_table = scores_post_processing(fundamental_data_table)
-
-fundamental_data_table.to_csv("output/" + current_date.strftime("%Y%m%d") + ".csv", index = False, header = True)
-fundamental_data_table.to_csv("output/output.csv", index = False, header = True)
-
-display_log("[" + str(dt.datetime.now()) + "] " + "Script duration " + str((dt.datetime.now() - script_start_time)))
+    display_log("[" + str(dt.datetime.now()) + "] " + "Script duration " + str((dt.datetime.now() - script_start_time)))

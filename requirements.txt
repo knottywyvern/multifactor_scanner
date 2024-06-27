@@ -1,3 +1,6 @@
+ib_insync
 pandas
 requests
 ta
+statsmodels
+lxml
