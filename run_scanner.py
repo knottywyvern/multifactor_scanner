@@ -701,12 +701,9 @@ def standardize_simple_scores(data_table):
     
 def scores_post_processing(data_table):
     data_table["Trailing Amt"] = data_table["Stop Vol fct"] * 100
-    data_table["1Month Reversal fct"] = data_table["1Month fct"] * scale_values(data_table["Turnover Z-Scores"], -1, 1)
-    data_table["1Month Reversal Z-Scores"] = scale_values(data_table["1Month Reversal fct"], -3, 3)
     data_table["Max ROC fct"] = 1 / abs(data_table["Max ROC raw"].mean() - data_table["Max ROC raw"])
     data_table["Max ROC Z-Scores"] = scale_values(data_table["Max ROC fct"], -3, 3)
     data_table["Return Volatility Z-Scores"] *= -1
-    data_table["Turnover Z-Scores"] *= -1
     data_table["Illiquidity Z-Scores"] = data_table["Illiquidity fct"] * -1 * \
                                          scale_values(data_table["Size fct"], -1, 1)
     data_table["Illiquidity Z-Scores"] = scale_values(data_table["Illiquidity Z-Scores"], -3, 3)
