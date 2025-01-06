@@ -34,6 +34,7 @@ turn_list, ill_list, stop_vol_list = [], [], []
 r_list = []
 stop_px_list, trailing_amt_list, offset_list = [], [], []
 isolated_ticker, primary_exchange_list, currency_code_list = [], [], []
+isFund_list = []
 
 
 # Check if we need to be using dev settings.
@@ -496,14 +497,14 @@ def calculate_illiquidity_ratio(returns, per_day_dvol):
 
 def calculate_turnover(general_data, volume, fund_data):
     if general_data.get("Type") in ["ETF", "FUND"]:
-        return 1
+        return np.nan, "FUND"
     elif general_data.get("Type") == "Common Stock":
         shares_outstanding = json.loads(fund_data).get("SharesStats", {}).get("SharesOutstanding")
         if shares_outstanding:
             turnover = sum(volume) / len(volume) / shares_outstanding
             display_log(f"Calculated Turnover: {turnover}")
-            return turnover
-    return "drop_ticker"
+            return turnover, "STOCK"
+    return "drop_ticker", "drop_ticker"
 
 
 def liquidity_analysis(ticker, stock_price_data, fund_data):
@@ -511,7 +512,7 @@ def liquidity_analysis(ticker, stock_price_data, fund_data):
 
     if not fund_data:
         display_log(f"No fund data available for {ticker}. Returning drop_ticker values.")
-        return ["drop_ticker", "drop_ticker", "drop_ticker"]
+        return ["drop_ticker", "drop_ticker", "drop_ticker", "drop_ticker"]
 
     try:
         fx_code = map_currency_code(extract_currency_code(fund_data))
@@ -531,11 +532,11 @@ def liquidity_analysis(ticker, stock_price_data, fund_data):
         general_data = json.loads(fund_data).get("General", {})
         turnover = calculate_turnover(general_data, volumes, fund_data)
 
-        return [dvol, turnover, ill]
+        return [dvol, turnover[0], ill, turnover[1]]
 
     except Exception as e:
         display_log(f"Unexpected error in liquidity analysis for {ticker}: {e}")
-        return ["drop_ticker", "drop_ticker", "drop_ticker"]
+        return ["drop_ticker", "drop_ticker", "drop_ticker", "drop_ticker"]
 
 
 # Fix for REITs and Trust units in Canada is causing bad data to be gathered
@@ -585,6 +586,8 @@ def append_liquidity_data(ticker, eod_data, fund_data):
     dvol_list.append(liquidity_var[0])
     turn_list.append(liquidity_var[1])
     ill_list.append(liquidity_var[2])
+    # While not part of liquidity factor, less calculations needed if placed here
+    isFund_list.append(liquidity_var[3])
 
 
 def append_trend_data(ticker, eod_data):
@@ -629,7 +632,8 @@ def compile_data():
         "Illiquidity fct": ill_list,
         "Trend Clarity fct": r_list,
         "PrimaryExchange": primary_exchange_list,
-        "Currency": currency_code_list
+        "Currency": currency_code_list,
+        "Security Type fct": isFund_list
     })
 
     numeric_size = pd.to_numeric(data_table["Size raw"], errors="coerce")
