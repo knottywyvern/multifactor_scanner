@@ -34,7 +34,7 @@ turn_list, ill_list, stop_vol_list = [], [], []
 r_list = []
 stop_px_list, trailing_amt_list, offset_list = [], [], []
 isolated_ticker, primary_exchange_list, currency_code_list = [], [], []
-isFund_list = []
+isFund_list, revenue_list = [], []
 
 
 # Check if we need to be using dev settings.
@@ -232,7 +232,6 @@ def price_last_close(ticker, stock_price_data):
         return 0
 
 
-# Getting non-numerical data of the ticker.
 def get_general_data(ticker, fund_data):
     """Fetch general stock data for the given ticker from the provided fundamental data."""
     display_log(f"Getting general {ticker} stock data.")
@@ -247,9 +246,13 @@ def get_general_data(ticker, fund_data):
     currency_code = general_data.get("CurrencyCode", "drop_ticker")
 
     share_data = fund_data_dict.get("SharesStats", {})
-    institutional_holders = share_data.get("PercentInstitutions", 0)
+    institutional_holders = share_data.get("PercentInstitutions", np.nan) # May be worth using np.nan here
 
-    return [stock_name, country_name, sector_name, industry_name, institutional_holders, primary_exchange, currency_code]
+    highlights_data = fund_data_dict.get("Highlights", {})
+    revenueTTM = highlights_data.get("RevenueTTM", np.nan)
+
+    return [stock_name, country_name, sector_name, industry_name, institutional_holders,
+            primary_exchange, currency_code, revenueTTM]
 
 
 def load_json_data(fund_data):
@@ -560,6 +563,7 @@ def append_general_data(ticker, fund_data, eod_data):
     institutional_holders_list.append(general_data_var[4])
     primary_exchange_list.append(general_data_var[5])
     currency_code_list.append(general_data_var[6])
+    revenue_list.append(general_data_var[7])
 
 
 def append_momentum_data(ticker, eod_data, fund_data):
@@ -633,7 +637,8 @@ def compile_data():
         "Trend Clarity fct": r_list,
         "PrimaryExchange": primary_exchange_list,
         "Currency": currency_code_list,
-        "Security Type fct": isFund_list
+        "Security Type fct": isFund_list,
+        "Revenue fct": revenue_list
     })
 
     numeric_size = pd.to_numeric(data_table["Size raw"], errors="coerce")
