@@ -1,4 +1,6 @@
 @echo off
+setlocal EnableDelayedExpansion
+
 echo Market Scanner Setup
 echo ===================
 echo.
@@ -54,10 +56,21 @@ if not exist license.txt (
     echo.
     echo Please enter your EOD Historical Data API Key:
     set /p API_KEY=
-
-    :: Save API key to license.txt
+    
+    :: Save API key to license.txt using delayed expansion
     echo Writing API key to license.txt...
-    echo %API_KEY%> license.txt
+    echo !API_KEY!> license.txt
+    
+    :: Verify the file was created successfully
+    if exist license.txt (
+        echo License file created successfully.
+        echo Content:
+        type license.txt
+    ) else (
+        echo ERROR: Failed to create license file.
+        echo Please create 'license.txt' manually and add your API key to it.
+        pause
+    )
 ) else (
     echo license.txt already exists, skipping API key entry.
 )
@@ -84,4 +97,4 @@ echo You can now run the scanner using run_scanner.bat
 echo.
 
 pause
-exit /b 0
+endlocal
