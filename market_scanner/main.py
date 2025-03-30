@@ -25,10 +25,11 @@ from .analysis import (
 from .processing import (
     output_rejected_tickers, filter_invalid_data, scores_post_processing
 )
+from .rate_limiter import global_rate_limiter
 
 async def build_ticker_list(config, index_tickers, token):
     """
-    Build the list of tickers to analyze.
+    Build the list of tickers to analyze, with rate limiting.
     
     Args:
         config (dict): Application configuration
@@ -40,7 +41,18 @@ async def build_ticker_list(config, index_tickers, token):
     """
     # Get tickers from market indices
     tickers = set()
-    tickers.update(await fetch_tickers_from_market_index(index_tickers, token))
+    
+    # Process indices in batches to avoid rate limiting issues
+    batch_size = min(5, len(index_tickers))  # Process no more than 5 indices at once
+    for i in range(0, len(index_tickers), batch_size):
+        batch = index_tickers[i:i+batch_size]
+        logging.info(f"Processing index batch {i//batch_size + 1}/{(len(index_tickers) + batch_size - 1)//batch_size}")
+        batch_tickers = await fetch_tickers_from_market_index(batch, token)
+        tickers.update(batch_tickers)
+        
+        # If we have a lot of tickers already, we might want to apply some filtering
+        if len(tickers) > 1000:
+            logging.warning(f"Large number of tickers ({len(tickers)}). Consider using more selective indices.")
     
     # Add tickers from inclusion file
     if os.path.exists(config["paths"].get("ticker_inclusion", "")):
@@ -60,6 +72,13 @@ async def build_ticker_list(config, index_tickers, token):
         )
         tickers.difference_update(exclusions)
     
+    # Apply ticker limit if specified
+    max_tickers = config.get("max_tickers", 0)
+    if max_tickers > 0 and len(tickers) > max_tickers:
+        logging.warning(f"Limiting analysis to {max_tickers} tickers (from {len(tickers)})")
+        # Convert to list, sort, and take the first max_tickers
+        tickers = sorted(list(tickers))[:max_tickers]
+    
     return list(tickers)
 
 async def main():
@@ -71,6 +90,11 @@ async def main():
     try:
         # Load configuration
         config = load_config()
+
+        # Configure rate limiting
+        rate_limit = config.get("api_rate_limit", 750)  # Default to 750 calls per minute
+        logging.info(f"Configuring API rate limiter: {rate_limit} calls per minute")
+        global_rate_limiter.max_calls = rate_limit
         
         # Setup logging
         logger = setup_logging(config)
@@ -111,16 +135,42 @@ async def main():
         ticker_list = await build_ticker_list(config, index_tickers, api_key)
         logger.info(f"Analyzing {len(ticker_list)} tickers")
         
-        # Fetch data for all tickers concurrently
-        logger.info("Fetching fundamental data...")
-        fundamental_data = await get_fundamental_data_async(ticker_list, api_key)
-        
-        logger.info("Fetching timeseries data...")
-        timeseries_data = await get_timeseries_data_async(
-            ticker_list, 
-            api_key,
-            timeseries_start_date.strftime("%Y-%m-%d")
-        )
+        # Fetch data for all tickers concurrently in batches
+        batch_size = config.get("api_batch_size", 50)  # Process 50 tickers at a time by default
+        logging.info(f"Using batch size of {batch_size} for API calls")
+
+        # Process tickers in batches
+        all_fundamental_data = {}
+        all_timeseries_data = {}
+
+        for i in range(0, len(ticker_list), batch_size):
+            batch = ticker_list[i:i+batch_size]
+            batch_num = i // batch_size + 1
+            total_batches = (len(ticker_list) + batch_size - 1) // batch_size
+            
+            logging.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} tickers)")
+            
+            # Fetch fundamental data for this batch
+            logging.info(f"Fetching fundamental data for batch {batch_num}...")
+            batch_fundamental_data = await get_fundamental_data_async(batch, api_key)
+            all_fundamental_data.update(batch_fundamental_data)
+            
+            # Fetch timeseries data for this batch
+            logging.info(f"Fetching timeseries data for batch {batch_num}...")
+            batch_timeseries_data = await get_timeseries_data_async(
+                batch, 
+                api_key,
+                timeseries_start_date.strftime("%Y-%m-%d")
+            )
+            all_timeseries_data.update(batch_timeseries_data)
+            
+            # Add a small delay between batches to avoid overwhelming the API
+            if i + batch_size < len(ticker_list):
+                await asyncio.sleep(1)
+
+        # Use the collected data
+        fundamental_data = all_fundamental_data
+        timeseries_data = all_timeseries_data
 
         # Log information about index tickers
         for index_ticker in index_tickers:

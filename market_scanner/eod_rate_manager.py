@@ -1,12 +1,16 @@
 """
-EOD Historical Data based risk-free rate manager.
+EOD Historical Data based risk-free rate manager with rate limiting.
 """
 import os
 import pandas as pd
 import requests
 import logging
 import datetime as dt
-from typing import Dict, Optional
+import asyncio
+import aiohttp
+from typing import Dict, Optional, List
+
+from .rate_limiter import global_rate_limiter, rate_limited_api_call
 
 class EODRateManager:
     """Class to manage risk-free rate data using EOD Historical Data API."""
@@ -64,9 +68,9 @@ class EODRateManager:
             "Hong Kong": {"symbol": "HKGG3.FXBOND", "description": "Hong Kong 3-Year Government Bond"}
         }
     
-    def get_rates(self, force_refresh=False) -> pd.DataFrame:
+    async def get_rates_async(self, force_refresh=False) -> pd.DataFrame:
         """
-        Get risk-free rates for all countries.
+        Get risk-free rates for all countries asynchronously, with rate limiting.
         
         Args:
             force_refresh: Whether to force refresh rates from API
@@ -88,11 +92,30 @@ class EODRateManager:
                 self.logger.warning(f"Error reading cached rates: {e}")
         
         # Get fresh rates from EOD Historical Data
-        return self._fetch_rates_from_eod()
+        return await self._fetch_rates_from_eod_async()
     
-    def update_region_data(self, region_df) -> pd.DataFrame:
+    def get_rates(self, force_refresh=False) -> pd.DataFrame:
         """
-        Update region data with latest risk-free rates.
+        Synchronous wrapper for get_rates_async.
+        
+        Args:
+            force_refresh: Whether to force refresh rates from API
+            
+        Returns:
+            DataFrame with risk-free rates
+        """
+        # Use asyncio to run the async method
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(self.get_rates_async(force_refresh))
+        except Exception as e:
+            self.logger.error(f"Error in get_rates: {e}")
+            return self._get_default_rates()
+    
+    async def update_region_data_async(self, region_df) -> pd.DataFrame:
+        """
+        Update region data with latest risk-free rates, asynchronously.
         
         Args:
             region_df: DataFrame with region data
@@ -101,7 +124,7 @@ class EODRateManager:
             Updated DataFrame with risk-free rates
         """
         # Get latest rates
-        rates_df = self.get_rates()
+        rates_df = await self.get_rates_async()
         
         # Create a copy of the input DataFrame
         result = region_df.copy()
@@ -118,53 +141,73 @@ class EODRateManager:
         
         return result
     
-    def _fetch_rates_from_eod(self) -> pd.DataFrame:
+    def update_region_data(self, region_df) -> pd.DataFrame:
         """
-        Fetch risk-free rates from EOD Historical Data API.
+        Synchronous wrapper for update_region_data_async.
+        
+        Args:
+            region_df: DataFrame with region data
+            
+        Returns:
+            Updated DataFrame with risk-free rates
+        """
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(self.update_region_data_async(region_df))
+        except Exception as e:
+            self.logger.error(f"Error in update_region_data: {e}")
+            
+            # If error, just return the original with default rates
+            result = region_df.copy()
+            if 'Rate' not in result.columns:
+                result['Rate'] = 0.03
+            return result
+    
+    async def _fetch_rates_from_eod_async(self) -> pd.DataFrame:
+        """
+        Fetch risk-free rates from EOD Historical Data API asynchronously.
+        Uses rate limiting to avoid hitting API limits.
         
         Returns:
             DataFrame with risk-free rates
         """
+        self.logger.info("Fetching rates from EOD Historical Data API (rate limited)...")
         rates_data = []
         rate_cache = {}  # Store rates for fallbacks
         
-        # First pass: try to get rates for all countries
-        for country, info in self.country_bonds.items():
-            symbol = info['symbol']
-            currency = info['currency']
-            
-            try:
+        async with aiohttp.ClientSession() as session:
+            # First pass: try to get rates for all countries
+            tasks = []
+            for country, info in self.country_bonds.items():
                 # Check if we should use an alternate source
                 if country in self.alternate_sources:
                     alt_info = self.alternate_sources[country]
-                    url = f"https://eodhistoricaldata.com/api/eod/{alt_info['symbol']}?api_token={self.api_key}&limit=1&fmt=json"
-                    self.logger.info(f"Using alternate source for {country}: {alt_info['description']}")
+                    symbol = alt_info['symbol']
+                    description = alt_info['description']
+                    self.logger.info(f"Using alternate source for {country}: {description}")
                 else:
-                    url = f"https://eodhistoricaldata.com/api/eod/{symbol}?api_token={self.api_key}&limit=1&fmt=json"
+                    symbol = info['symbol']
                 
-                response = requests.get(url)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    if data and len(data) > 0:
-                        rate = float(data[0]['close']) / 100  # Convert percentage to decimal
-                        
-                        # Store in cache for fallbacks
-                        rate_cache[symbol] = rate
-                        
-                        rates_data.append({
-                            "Country": country,
-                            "Currency": currency,
-                            "Rate": rate,
-                            "Source": symbol,
-                            "Last_Updated": dt.datetime.now().strftime("%Y-%m-%d")
-                        })
-                    else:
-                        self.logger.warning(f"No data returned for {symbol}")
-                else:
-                    self.logger.warning(f"Error fetching data for {symbol}: {response.status_code}")
-            except Exception as e:
-                self.logger.error(f"Error processing {symbol}: {e}")
+                url = f"https://eodhistoricaldata.com/api/eod/{symbol}?api_token={self.api_key}&limit=1&fmt=json"
+                tasks.append(self._fetch_rate_with_limit(session, url, country, info, symbol))
+            
+            # Wait for all tasks to complete
+            results = await asyncio.gather(*tasks)
+            
+            # Collect results
+            for result in results:
+                if result is not None:
+                    country, rate, symbol = result
+                    rates_data.append({
+                        "Country": country,
+                        "Currency": self.country_bonds[country]["currency"],
+                        "Rate": rate,
+                        "Source": symbol,
+                        "Last_Updated": dt.datetime.now().strftime("%Y-%m-%d")
+                    })
+                    # Store in cache for fallbacks
+                    rate_cache[symbol] = rate
         
         # Second pass: use fallbacks for countries without data
         countries_with_data = {item["Country"] for item in rates_data}
@@ -193,55 +236,82 @@ class EODRateManager:
             return rates_df
         else:
             self.logger.error("Failed to fetch any rates from EOD Historical Data")
+            return self._get_default_rates()
+    
+    async def _fetch_rate_with_limit(self, session, url, country, info, symbol):
+        """
+        Fetch a single rate with rate limiting.
+        
+        Args:
+            session: aiohttp session
+            url: API URL
+            country: Country name
+            info: Country info dictionary
+            symbol: Symbol to fetch
             
-            # If we have cached data, use it as fallback
-            if os.path.exists(self.rates_file):
-                self.logger.info("Using cached rates as fallback")
-                return pd.read_csv(self.rates_file)
+        Returns:
+            Tuple of (country, rate, symbol) or None if error
+        """
+        # Apply rate limiting
+        await global_rate_limiter.acquire()
+        try:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data and len(data) > 0:
+                        rate = float(data[0]['close']) / 100  # Convert percentage to decimal
+                        return country, rate, symbol
+                    else:
+                        self.logger.warning(f"No data returned for {symbol}")
+                else:
+                    self.logger.warning(f"Error fetching data for {symbol}: {response.status}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Error processing {symbol}: {e}")
+            return None
+        finally:
+            global_rate_limiter.release()
+    
+    def _get_default_rates(self) -> pd.DataFrame:
+        """
+        Create default risk-free rates as a last resort.
+        
+        Returns:
+            DataFrame with default rates
+        """
+        self.logger.warning("Creating default rates")
+        default_data = []
+        
+        for country, info in self.country_bonds.items():
+            # Use country-specific default rates
+            default_rate = 0.03  # Default 3%
             
-            # Last resort: create default data
-            self.logger.warning("Creating default rates")
-            default_data = []
-            for country, info in self.country_bonds.items():
-                # Use country-specific default rates
-                default_rate = 0.03  # Default 3%
-                
-                # Adjust for specific countries
-                if country == "Japan":
-                    default_rate = 0.005  # 0.5%
-                elif country == "Switzerland":
-                    default_rate = 0.01  # 1%
-                elif country in ["Brazil", "Mexico", "India"]:
-                    default_rate = 0.07  # 7%
-                elif country == "China":
-                    default_rate = 0.025  # 2.5%
-                elif country == "Hong Kong":
-                    default_rate = 0.03  # 3% (pegged to USD)
-                
-                default_data.append({
-                    "Country": country,
-                    "Currency": info['currency'],
-                    "Rate": default_rate,
-                    "Source": "Default",
-                    "Last_Updated": dt.datetime.now().strftime("%Y-%m-%d")
-                })
+            # Adjust for specific countries
+            if country == "Japan":
+                default_rate = 0.005  # 0.5%
+            elif country == "Switzerland":
+                default_rate = 0.01  # 1%
+            elif country in ["Brazil", "Mexico", "India"]:
+                default_rate = 0.07  # 7%
+            elif country == "China":
+                default_rate = 0.025  # 2.5%
+            elif country == "Hong Kong":
+                default_rate = 0.03  # 3% (pegged to USD)
             
-            default_df = pd.DataFrame(default_data)
+            default_data.append({
+                "Country": country,
+                "Currency": info['currency'],
+                "Rate": default_rate,
+                "Source": "Default",
+                "Last_Updated": dt.datetime.now().strftime("%Y-%m-%d")
+            })
+        
+        default_df = pd.DataFrame(default_data)
+        
+        # Save to cache
+        try:
             default_df.to_csv(self.rates_file, index=False)
-            
-            return default_df
-
-# Example usage
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    
-    # Load API key
-    with open("license.txt", "r") as f:
-        api_key = f.read().strip()
-    
-    # Create rate manager
-    rate_manager = EODRateManager(api_key)
-    
-    # Get rates
-    rates = rate_manager.get_rates(force_refresh=True)
-    print(rates)
+        except Exception as e:
+            self.logger.error(f"Error saving default rates: {e}")
+        
+        return default_df

@@ -9,6 +9,13 @@ timeseries_days_lookback: 882
 # Default index to use if none specified
 default_index: "DIA.US"
 
+# API rate limiting settings
+api_rate_limit: 750  # Maximum API calls per minute (EOD limit is 1000)
+api_batch_size: 50   # Process tickers in batches of this size
+
+# Maximum number of tickers to analyze (0 = no limit)
+max_tickers: 0
+
 # File paths
 paths:
   # API license file containing the API key

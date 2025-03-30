@@ -13,6 +13,7 @@ import aiohttp
 import numpy as np
 
 from .utils import display_log, load_json_data, load_tickers_from_file
+from .rate_limiter import global_rate_limiter, rate_limited_api_call
 
 def create_session():
     """
@@ -71,7 +72,7 @@ def canada_check(url, ticker):
 
 async def async_canada_check(session, url, ticker):
     """
-    Async version of canada_check.
+    Async version of canada_check with rate limiting.
     
     Args:
         session (aiohttp.ClientSession): Async session
@@ -81,22 +82,27 @@ async def async_canada_check(session, url, ticker):
     Returns:
         tuple: (response content, ticker)
     """
-    if ticker.endswith('.TO'):
-        url_un = url.replace(ticker, ticker[:-3] + "-UN.TO")
-        async with session.get(url_un) as response:
+    # Apply rate limiting
+    await global_rate_limiter.acquire()
+    try:
+        if ticker.endswith('.TO'):
+            url_un = url.replace(ticker, ticker[:-3] + "-UN.TO")
+            async with session.get(url_un) as response:
+                if response.status == 200:
+                    content = await response.read()
+                    text = content.decode("utf-8")
+                    if text not in ["Ticker Not Found.", "Symbol not found"]:
+                        return content, ticker
+        
+        async with session.get(url) as response:
             if response.status == 200:
                 content = await response.read()
-                text = content.decode("utf-8")
-                if text not in ["Ticker Not Found.", "Symbol not found"]:
-                    return content, ticker
-    
-    async with session.get(url) as response:
-        if response.status == 200:
-            content = await response.read()
-            return content, ticker
-        else:
-            logging.warning(f"Failed to get data for {ticker}: HTTP {response.status}")
-            return None, ticker
+                return content, ticker
+            else:
+                logging.warning(f"Failed to get data for {ticker}: HTTP {response.status}")
+                return None, ticker
+    finally:
+        global_rate_limiter.release()
 
 def get_fundamental_data(ticker, token):
     """
@@ -119,7 +125,7 @@ def get_fundamental_data(ticker, token):
 
 async def get_fundamental_data_async(tickers, token):
     """
-    Fetch fundamental data for multiple tickers concurrently.
+    Fetch fundamental data for multiple tickers concurrently with rate limiting.
     
     Args:
         tickers (list): List of ticker symbols
@@ -128,13 +134,14 @@ async def get_fundamental_data_async(tickers, token):
     Returns:
         dict: Dictionary mapping tickers to fundamental data
     """
-    display_log(f"Getting fundamental data for {len(tickers)} tickers concurrently.")
+    display_log(f"Getting fundamental data for {len(tickers)} tickers concurrently (rate limited to 750/min).")
     results = {}
     
     async with aiohttp.ClientSession() as session:
         tasks = []
         for ticker in tickers:
             url = f"https://eodhistoricaldata.com/api/fundamentals/{ticker}?api_token={token}"
+            # We don't need to rate limit here since async_canada_check is already rate limited
             tasks.append(async_canada_check(session, url, ticker))
         
         for future in asyncio.as_completed(tasks):
@@ -181,7 +188,7 @@ def get_timeseries_data(ticker, token):
 
 async def get_timeseries_data_async(tickers, token, start_date):
     """
-    Fetch timeseries data for multiple tickers concurrently.
+    Fetch timeseries data for multiple tickers concurrently with rate limiting.
     
     Args:
         tickers (list): List of ticker symbols
@@ -191,13 +198,14 @@ async def get_timeseries_data_async(tickers, token, start_date):
     Returns:
         dict: Dictionary mapping tickers to timeseries DataFrames
     """
-    display_log(f"Getting timeseries data for {len(tickers)} tickers concurrently.")
+    display_log(f"Getting timeseries data for {len(tickers)} tickers concurrently (rate limited to 750/min).")
     results = {}
     
     async with aiohttp.ClientSession() as session:
         tasks = []
         for ticker in tickers:
             url = f"https://eodhistoricaldata.com/api/eod/{ticker}?from={start_date}&api_token={token}"
+            # We don't need to rate limit here since async_canada_check is already rate limited
             tasks.append(async_canada_check(session, url, ticker))
         
         for future in asyncio.as_completed(tasks):
@@ -215,9 +223,33 @@ async def get_timeseries_data_async(tickers, token, start_date):
     display_log(f"Retrieved timeseries data for {len(results)} tickers.")
     return results
 
+@global_rate_limiter  # This uses the rate limiter as a decorator
+async def fetch_website_data_async(url):
+    """
+    Fetch HTML table data from a website with rate limiting.
+    
+    Args:
+        url (str): Website URL
+        
+    Returns:
+        pandas.DataFrame: Table data
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                response.raise_for_status()
+                content = await response.read()
+                return pd.read_html(content)[0]
+    except aiohttp.ClientError as e:
+        logging.error(f"Failed to fetch website data from {url}: {e}")
+        raise ConnectionError(f"Network error: {e}")
+    except ValueError as e:
+        logging.error(f"No tables found at {url}: {e}")
+        raise ValueError(f"Table parsing error: {e}")
+
 def fetch_website_data(url):
     """
-    Fetch HTML table data from a website.
+    Fetch HTML table data from a website with rate limiting.
     
     Args:
         url (str): Website URL
