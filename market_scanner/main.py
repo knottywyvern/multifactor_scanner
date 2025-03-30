@@ -121,6 +121,33 @@ async def main():
             api_key,
             timeseries_start_date.strftime("%Y-%m-%d")
         )
+
+        # Log information about index tickers
+        for index_ticker in index_tickers:
+            if index_ticker in fundamental_data:
+                try:
+                    fund_data_dict = load_json_data(fundamental_data[index_ticker])
+                    holdings_count = 0
+                    ticker_examples = []
+                    
+                    if "Holdings" in fund_data_dict:
+                        holdings = fund_data_dict["Holdings"]
+                        if isinstance(holdings, dict) and len(holdings) >= 3:
+                            holdings_data = holdings.get(2, {})
+                            if holdings_data:
+                                holdings_count = len(holdings_data)
+                                ticker_examples = list(holdings_data.keys())[:5]  # First 5 tickers
+                    
+                    logging.info(f"Index {index_ticker} information:")
+                    logging.info(f"  - Holdings count: {holdings_count}")
+                    if ticker_examples:
+                        logging.info(f"  - Example tickers: {', '.join(ticker_examples)}")
+                    else:
+                        logging.warning(f"  - No holdings found for {index_ticker}")
+                except Exception as e:
+                    logging.error(f"Error processing index {index_ticker}: {e}")
+            else:
+                logging.error(f"Failed to retrieve fundamental data for index {index_ticker}")
         
         # Create market analysis object
         market_analysis = MarketAnalysis()

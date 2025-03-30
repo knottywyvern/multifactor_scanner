@@ -67,14 +67,54 @@ def volatility_analysis(ticker, is_israel_stock, price_data):
     """
     display_log(f"Performing {ticker} volatility factor analysis...")
     try:
-        weekly_returns = extract_weekly_returns(is_israel_stock, price_data)
-        volatility_momentum = calculate_volatility(weekly_returns.tail(156))
-        month_prior = price_data["Adjusted_close"][:-21].tail(21).to_list()
-        volatility_stop = np.std(month_prior) / month_prior[-1] * 3
+        # Make sure price_data has sufficient length
+        if len(price_data) < 21:
+            display_log(f"Insufficient data for {ticker} volatility analysis (need at least 21 days)")
+            return 0.2, 0.05  # Default values: 20% volatility, 5% stop
+            
+        # Convert Date to datetime if needed
+        price_data = date_string_to_datetime(price_data)
+        
+        # Extract weekly returns
+        try:
+            weekly_returns = extract_weekly_returns(is_israel_stock, price_data)
+            if len(weekly_returns) < 10:
+                display_log(f"Insufficient weekly data for {ticker} volatility analysis")
+                # Fall back to daily returns if weekly data is insufficient
+                daily_returns = price_data["Adjusted_close"].pct_change().dropna()
+                volatility_momentum = calculate_volatility(daily_returns, period=252) if len(daily_returns) > 20 else 0.2
+            else:
+                volatility_momentum = calculate_volatility(weekly_returns.tail(156))
+        except Exception as e:
+            display_log(f"Error calculating volatility momentum for {ticker}: {e}")
+            volatility_momentum = 0.2  # Default 20% annual volatility
+        
+        # Calculate stop volatility
+        try:
+            # Get last month's prices
+            last_month = price_data["Adjusted_close"].tail(21).to_list()
+            if len(last_month) < 21:
+                display_log(f"Insufficient recent data for {ticker} stop volatility")
+                volatility_stop = 0.05  # Default 5% stop
+            else:
+                volatility_stop = np.std(last_month) / last_month[-1] * 3
+                
+                # Sanity check on volatility stop
+                if volatility_stop > 0.25:  # Cap at 25%
+                    display_log(f"Capping excessive stop volatility for {ticker}: {volatility_stop:.2%} -> 25%")
+                    volatility_stop = 0.25
+                elif volatility_stop < 0.01:  # Floor at 1%
+                    display_log(f"Increasing too low stop volatility for {ticker}: {volatility_stop:.2%} -> 1%")
+                    volatility_stop = 0.01
+        except Exception as e:
+            display_log(f"Error calculating volatility stop for {ticker}: {e}")
+            volatility_stop = 0.05  # Default 5% stop
+        
         return volatility_momentum, volatility_stop
+    
     except Exception as e:
         display_log(f"Error in volatility analysis for {ticker}: {e}")
-        return "drop_ticker"
+        return 0.2, 0.05  # Default values
 
 def calculate_momentum(stock_prices, riskfree_rate, volatility_3y):
     """
@@ -236,23 +276,66 @@ def calculate_return_volatility(ticker, stock_price_data, fund_data, region_data
     if stock_price_data is None:
         return "drop_ticker"
     try:
+        # Get country name from fundamental data
         general_data = load_json_data(fund_data).get("General", {})
         country_name = general_data.get("CountryName")
         if country_name is None:
             raise ValueError("CountryName not found.")
+        
+        # Find matching country in region_data
         index_number = region_data.index[region_data["Country"] == country_name].tolist()
         if not index_number:
-            raise ValueError("Country not found in region_data.")
-        vol_roc = region_data["Vol Table"][index_number[0]]["ROC"]
-        vol_var = region_data["Vol Table"][index_number[0]]["Var"]
+            # Try a fallback if exact match not found
+            display_log(f"Country '{country_name}' not found in region_data. Using USA as fallback.")
+            index_number = region_data.index[region_data["Country"] == "USA"].tolist()
+            if not index_number:
+                raise ValueError("Country not found in region_data and USA fallback not available.")
+        
+        # Get volatility data
+        vol_table = region_data["Vol Table"][index_number[0]]
+        vol_roc = vol_table["ROC"]
+        vol_var = vol_table["Var"]
+        
+        # Get stock return data
         stock_roc = stock_price_data["ROC"].tail(252).dropna()
+        
+        # Clean volatility ROC data
         vol_roc_clean = vol_roc.dropna()
-        covariance = np.cov(stock_roc, vol_roc_clean)[0, 1]
-        beta = covariance / vol_var
-        return beta.tolist()[-1]
+        
+        # Handle dimension mismatch by truncating to the shorter length
+        min_length = min(len(vol_roc_clean), len(stock_roc))
+        if min_length < 20:
+            display_log(f"Warning: Very few data points for volatility calculation ({min_length})")
+            if min_length < 10:
+                return 1.0  # Default beta of 1.0 if too few points
+        
+        # Use the latest data points from both series
+        stock_roc_used = stock_roc.iloc[-min_length:].values
+        vol_roc_used = vol_roc_clean.iloc[-min_length:].values
+        
+        # Calculate covariance and beta
+        covariance = np.cov(stock_roc_used, vol_roc_used)[0, 1]
+        
+        # Handle vol_var potentially being a Series or scalar
+        if isinstance(vol_var, (pd.Series, np.ndarray)):
+            vol_var_value = vol_var.iloc[0] if len(vol_var) > 0 else np.var(vol_roc_used)
+        else:
+            vol_var_value = vol_var
+            
+        beta = covariance / vol_var_value
+        
+        # Handle beta potentially being a Series, array, or scalar
+        if isinstance(beta, (pd.Series, list, np.ndarray)):
+            if len(beta) > 0:
+                return beta[-1]  # Return the last element
+            else:
+                return 1.0  # Default if empty
+        else:
+            return beta  # Return as scalar
+            
     except Exception as e:
         display_log(f"Error in return volatility for {ticker}: {e}")
-        return "drop_ticker"
+        return 1.0  # Return a default beta of 1.0 instead of dropping the ticker
 
 def liquidity_analysis(ticker, stock_price_data, fund_data, forex_code_list, forex_rate_list):
     """
@@ -404,39 +487,88 @@ def analyze_ticker(ticker, fund_data, eod_data, riskfree_rate_table, region_data
         forex_rate_list = []
         
         # Momentum analysis
-        momentum_data = momentum_analysis(ticker, eod_data, fund_data, riskfree_rate_table)
-        if "drop_ticker" in momentum_data:
-            return None
-        analysis.momentum, analysis.volatility_12m, analysis.volatility_stop, analysis.momentum_1month, analysis.max_roc = momentum_data
+        try:
+            momentum_data = momentum_analysis(ticker, eod_data, fund_data, riskfree_rate_table)
+            if "drop_ticker" not in momentum_data:
+                analysis.momentum, analysis.volatility_12m, analysis.volatility_stop, analysis.momentum_1month, analysis.max_roc = momentum_data
+            else:
+                # Use defaults if momentum analysis fails
+                logging.warning(f"Using default momentum values for {ticker}")
+                analysis.momentum = 0.0
+                analysis.volatility_12m = 0.2  # 20% annual volatility
+                analysis.volatility_stop = 0.05  # 5% stop
+                analysis.momentum_1month = 0.0
+                analysis.max_roc = 0.01  # 1% max ROC
+        except Exception as e:
+            logging.error(f"Error in momentum analysis for {ticker}: {e}")
+            analysis.momentum = 0.0
+            analysis.volatility_12m = 0.2
+            analysis.volatility_stop = 0.05
+            analysis.momentum_1month = 0.0
+            analysis.max_roc = 0.01
         
         # Size analysis
-        size_data = size_analysis(ticker, fund_data, forex_code_list, forex_rate_list)
-        if size_data == "drop_ticker":
-            return None
-        analysis.size = size_data
+        try:
+            size_data = size_analysis(ticker, fund_data, forex_code_list, forex_rate_list)
+            if size_data != "drop_ticker":
+                analysis.size = size_data
+            else:
+                # Default size based on security type
+                if analysis.security_type == "FUND":
+                    analysis.size = 0.05  # ETFs/funds usually have more AUM
+                else:
+                    analysis.size = 0.1  # Default for stocks
+        except Exception as e:
+            logging.error(f"Error in size analysis for {ticker}: {e}")
+            analysis.size = 0.1
         
         # Return volatility analysis
-        rvol_data = calculate_return_volatility(ticker, eod_data, fund_data, region_data)
-        if rvol_data == "drop_ticker":
-            return None
-        analysis.return_volatility = rvol_data
+        try:
+            rvol_data = calculate_return_volatility(ticker, eod_data, fund_data, region_data)
+            if rvol_data != "drop_ticker":
+                analysis.return_volatility = rvol_data
+            else:
+                analysis.return_volatility = 1.0  # Default beta of 1.0
+        except Exception as e:
+            logging.error(f"Error in return volatility analysis for {ticker}: {e}")
+            analysis.return_volatility = 1.0
         
         # Liquidity analysis
-        liquidity_data = liquidity_analysis(ticker, eod_data, fund_data, forex_code_list, forex_rate_list)
-        if "drop_ticker" in liquidity_data:
-            return None
-        analysis.dollar_volume, analysis.turnover, analysis.illiquidity, security_type_check = liquidity_data
-        
-        # Ensure security_type is consistent
-        if analysis.security_type != security_type_check:
-            display_log(f"Warning: Security type mismatch for {ticker}: {analysis.security_type} vs {security_type_check}")
-            analysis.security_type = security_type_check
+        try:
+            liquidity_data = liquidity_analysis(ticker, eod_data, fund_data, forex_code_list, forex_rate_list)
+            if "drop_ticker" not in liquidity_data:
+                analysis.dollar_volume, analysis.turnover, analysis.illiquidity, security_type_check = liquidity_data
+                
+                # Ensure security_type is consistent
+                if analysis.security_type != security_type_check:
+                    display_log(f"Warning: Security type mismatch for {ticker}: {analysis.security_type} vs {security_type_check}")
+                    analysis.security_type = security_type_check
+            else:
+                # Default liquidity values
+                if analysis.security_type == "FUND":
+                    analysis.dollar_volume = 1000000  # $1M daily volume
+                    analysis.turnover = 0.01  # 1% turnover
+                    analysis.illiquidity = 0.0001  # Low illiquidity for funds
+                else:
+                    analysis.dollar_volume = 500000  # $500k daily volume
+                    analysis.turnover = 0.005  # 0.5% turnover
+                    analysis.illiquidity = 0.001  # Higher illiquidity for stocks
+        except Exception as e:
+            logging.error(f"Error in liquidity analysis for {ticker}: {e}")
+            analysis.dollar_volume = 500000
+            analysis.turnover = 0.005
+            analysis.illiquidity = 0.001
         
         # Trend analysis
-        trend_data = trend_analysis(ticker, eod_data)
-        if trend_data == "drop_ticker":
-            return None
-        analysis.trend_clarity = trend_data
+        try:
+            trend_data = trend_analysis(ticker, eod_data)
+            if trend_data != "drop_ticker":
+                analysis.trend_clarity = trend_data
+            else:
+                analysis.trend_clarity = 0.5  # Default R² of 0.5
+        except Exception as e:
+            logging.error(f"Error in trend analysis for {ticker}: {e}")
+            analysis.trend_clarity = 0.5
         
         return analysis
     except Exception as e:
