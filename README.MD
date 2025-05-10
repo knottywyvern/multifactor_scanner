@@ -12,8 +12,15 @@ A comprehensive tool for analyzing financial market data and performing factor-b
   - Return volatility
   - Liquidity
   - Trend clarity
+- Calculate key performance metrics (10-year period):
+  - CAGR (Compound Annual Growth Rate)
+  - Maximum Drawdown
+  - Longest Drawdown
+  - Calmar Ratio
+  - Standard Deviation (annualized)
+  - Sharpe Ratio
+  - Sortino Ratio
 - Generate standardized scores
-- Calculate stop prices and limit offsets
 - Export results to CSV
 
 ## Installation

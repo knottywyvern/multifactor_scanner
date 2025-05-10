@@ -86,9 +86,18 @@ class TickerAnalysis:
     revenue: Optional[float] = None
     
     # Derived values
-    trailing_amount: Optional[float] = None
-    stop_price: Optional[float] = None
-    limit_offset: Optional[float] = None
+    # trailing_amount: Optional[float] = None
+    # stop_price: Optional[float] = None
+    # limit_offset: Optional[float] = None
+    
+    # New financial metrics (last 10 years)
+    cagr: Optional[float] = None
+    longest_drawdown: Optional[float] = None # Duration in days/periods
+    max_drawdown: Optional[float] = None
+    calmar_ratio: Optional[float] = None
+    std_dev: Optional[float] = None
+    sharpe_ratio: Optional[float] = None
+    sortino_ratio: Optional[float] = None
     
     # Standardized scores
     z_scores: Dict[str, float] = field(default_factory=dict)
@@ -124,15 +133,24 @@ class TickerAnalysis:
             "Illiquidity fct": self.illiquidity,
             "Trend Clarity fct": self.trend_clarity,
             "Revenue fct": self.revenue,
+            
+            # New financial metrics
+            "CAGR 10yr fct": self.cagr,
+            "Longest Drawdown fct": self.longest_drawdown,
+            "Max Drawdown 10yr fct": self.max_drawdown,
+            "Calmar Ratio 10yr fct": self.calmar_ratio,
+            "Std Dev 10yr fct": self.std_dev,
+            "Sharpe Ratio 10yr fct": self.sharpe_ratio,
+            "Sortino Ratio 10yr fct": self.sortino_ratio,
         }
         
         # Add derived values if available
-        if self.trailing_amount is not None:
-            result["Trailing Amt"] = self.trailing_amount
-        if self.stop_price is not None:
-            result["Stop Px"] = self.stop_price
-        if self.limit_offset is not None:
-            result["Limit Offset"] = self.limit_offset
+        # if self.trailing_amount is not None:
+        #     result["Trailing Amt"] = self.trailing_amount
+        # if self.stop_price is not None:
+        #     result["Stop Px"] = self.stop_price
+        # if self.limit_offset is not None:
+        #     result["Limit Offset"] = self.limit_offset
             
         # Add z-scores
         for key, value in self.z_scores.items():

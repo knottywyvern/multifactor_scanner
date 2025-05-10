@@ -116,6 +116,126 @@ def volatility_analysis(ticker, is_israel_stock, price_data):
         display_log(f"Error in volatility analysis for {ticker}: {e}")
         return 0.2, 0.05  # Default values
 
+def calculate_financial_metrics(ticker, stock_price_data, riskfree_rate):
+    """
+    Calculate financial metrics over the last 10 years.
+    
+    Args:
+        ticker (str): Ticker symbol
+        stock_price_data (pd.DataFrame): DataFrame with 'Date' and 'Adjusted_close'
+        riskfree_rate (float): Annualized risk-free rate
+        
+    Returns:
+        dict: Dictionary containing the calculated metrics or None if insufficient data.
+    """
+    display_log(f"Calculating financial metrics for {ticker}...")
+    if stock_price_data is None or stock_price_data.empty:
+        display_log(f"No price data for {ticker} to calculate financial metrics.")
+        return None
+
+    try:
+        # Ensure 'Date' is datetime and set as index
+        if "Date" not in stock_price_data.columns:
+            display_log(f"'Date' column missing in price data for {ticker}.")
+            return None
+        
+        price_data = stock_price_data.copy()
+        price_data["Date"] = pd.to_datetime(price_data["Date"])
+        price_data = price_data.set_index("Date")
+        
+        # Filter for the last 10 years
+        ten_years_ago = pd.Timestamp.now() - pd.DateOffset(years=10)
+        price_data = price_data[price_data.index >= ten_years_ago]
+        
+        if len(price_data) < 2: # Need at least two data points for returns
+            display_log(f"Insufficient data (less than 2 points) in the last 10 years for {ticker}.")
+            return None
+
+        # Use 'Adjusted_close' for calculations
+        if "Adjusted_close" not in price_data.columns:
+            display_log(f"'Adjusted_close' column missing for {ticker}.")
+            return None
+            
+        adj_close = price_data["Adjusted_close"]
+
+        # Calculate daily returns (assuming daily data for now, might need adjustment for weekly)
+        # Assuming data is sorted by date
+        returns = adj_close.pct_change().dropna()
+
+        if returns.empty:
+            display_log(f"No returns could be calculated for {ticker} in the last 10 years.")
+            return None
+            
+        # Annualization factor (assuming daily data, ~252 trading days a year)
+        annualization_factor = 252
+        if len(returns) < annualization_factor / 4: # Require at least a quarter of a year of returns
+             display_log(f"Warning: Less than a quarter of a year of return data for {ticker}. Metrics might be unreliable.")
+
+        # CAGR
+        start_price = adj_close.iloc[0]
+        end_price = adj_close.iloc[-1]
+        num_years = (adj_close.index[-1] - adj_close.index[0]).days / 365.25
+        if num_years == 0: # Avoid division by zero if only one data point somehow passed filters
+            cagr = 0.0
+        else:
+            cagr = (end_price / start_price)**(1 / num_years) - 1 if start_price > 0 else np.nan
+
+        # Standard Deviation (Annualized)
+        std_dev = returns.std() * np.sqrt(annualization_factor)
+
+        # Sharpe Ratio (Annualized)
+        mean_return_annualized = returns.mean() * annualization_factor
+        sharpe_ratio = (mean_return_annualized - riskfree_rate) / std_dev if std_dev > 0 else np.nan
+
+        # Sortino Ratio (Annualized)
+        negative_returns = returns[returns < 0]
+        downside_std_dev = negative_returns.std() * np.sqrt(annualization_factor)
+        sortino_ratio = (mean_return_annualized - riskfree_rate) / downside_std_dev if downside_std_dev > 0 else np.nan
+
+        # Drawdowns
+        cumulative_returns = (1 + returns).cumprod()
+        peak = cumulative_returns.expanding(min_periods=1).max()
+        drawdown = (cumulative_returns / peak) - 1
+        max_drawdown = drawdown.min()
+
+        # Longest Drawdown
+        drawdown_periods = drawdown[drawdown < 0]
+        longest_drawdown_duration = 0
+        current_drawdown_duration = 0
+        in_drawdown = False
+        for date, val in drawdown.items(): # Iterate through the original drawdown series
+            if val < 0:
+                if not in_drawdown:
+                    in_drawdown = True
+                    current_drawdown_duration = 0 # Reset counter at the start of a new drawdown period
+                current_drawdown_duration += 1
+            else:
+                if in_drawdown:
+                    longest_drawdown_duration = max(longest_drawdown_duration, current_drawdown_duration)
+                    in_drawdown = False
+                    current_drawdown_duration = 0 # Reset when drawdown ends
+        if in_drawdown: # Check if still in drawdown at the end of the series
+            longest_drawdown_duration = max(longest_drawdown_duration, current_drawdown_duration)
+        
+        # Calmar Ratio
+        # Use annualized CAGR. If num_years < 1, CAGR can be very large or misleading.
+        # For Calmar, typically use CAGR over at least 3 years. Here we use the 10-year CAGR.
+        calmar_ratio = cagr / abs(max_drawdown) if max_drawdown < 0 else np.nan
+
+        return {
+            "cagr": cagr,
+            "longest_drawdown": longest_drawdown_duration, # In periods (days if daily data)
+            "max_drawdown": max_drawdown,
+            "calmar_ratio": calmar_ratio,
+            "std_dev": std_dev,
+            "sharpe_ratio": sharpe_ratio,
+            "sortino_ratio": sortino_ratio,
+        }
+
+    except Exception as e:
+        display_log(f"Error calculating financial metrics for {ticker}: {e}")
+        return None
+
 def calculate_momentum(stock_prices, riskfree_rate, volatility_3y):
     """
     Calculate momentum factors.
@@ -486,6 +606,12 @@ def analyze_ticker(ticker, fund_data, eod_data, riskfree_rate_table, region_data
         forex_code_list = []
         forex_rate_list = []
         
+        # Get the appropriate risk-free rate for the stock's currency
+        # Default to a common rate (e.g., USD rate or average) if specific currency not found
+        stock_currency_code = map_currency_code(analysis.currency)
+        rfr_series = riskfree_rate_table[riskfree_rate_table["Currency"] == stock_currency_code]["Rate"]
+        riskfree_rate_for_stock = rfr_series.iloc[0] if not rfr_series.empty else 0.03 # Default to 3% if not found
+
         # Momentum analysis
         try:
             momentum_data = momentum_analysis(ticker, eod_data, fund_data, riskfree_rate_table)
@@ -570,6 +696,37 @@ def analyze_ticker(ticker, fund_data, eod_data, riskfree_rate_table, region_data
             logging.error(f"Error in trend analysis for {ticker}: {e}")
             analysis.trend_clarity = 0.5
         
+        # Calculate financial metrics (CAGR, Drawdowns, Sharpe, etc.)
+        try:
+            financial_metrics = calculate_financial_metrics(ticker, eod_data, riskfree_rate_for_stock)
+            if financial_metrics:
+                analysis.cagr = financial_metrics.get("cagr")
+                analysis.longest_drawdown = financial_metrics.get("longest_drawdown")
+                analysis.max_drawdown = financial_metrics.get("max_drawdown")
+                analysis.calmar_ratio = financial_metrics.get("calmar_ratio")
+                analysis.std_dev = financial_metrics.get("std_dev")
+                analysis.sharpe_ratio = financial_metrics.get("sharpe_ratio")
+                analysis.sortino_ratio = financial_metrics.get("sortino_ratio")
+            else:
+                # Set defaults if metrics calculation fails or returns None
+                logging.warning(f"Using default financial metrics for {ticker}")
+                analysis.cagr = np.nan
+                analysis.longest_drawdown = np.nan
+                analysis.max_drawdown = np.nan
+                analysis.calmar_ratio = np.nan
+                analysis.std_dev = np.nan
+                analysis.sharpe_ratio = np.nan
+                analysis.sortino_ratio = np.nan
+        except Exception as e:
+            logging.error(f"Error calculating financial metrics for {ticker}: {e}")
+            analysis.cagr = np.nan
+            analysis.longest_drawdown = np.nan
+            analysis.max_drawdown = np.nan
+            analysis.calmar_ratio = np.nan
+            analysis.std_dev = np.nan
+            analysis.sharpe_ratio = np.nan
+            analysis.sortino_ratio = np.nan
+            
         return analysis
     except Exception as e:
         display_log(f"Failed to analyze {ticker}: {e}")
@@ -621,16 +778,16 @@ def calculate_derived_values(market_analysis):
     
     for analysis in market_analysis.analyses:
         # Calculate trailing amount
-        if analysis.volatility_stop is not None:
-            analysis.trailing_amount = analysis.volatility_stop * 100
+        # if analysis.volatility_stop is not None:
+        #     analysis.trailing_amount = analysis.volatility_stop * 100
         
         # Calculate stop price
-        if analysis.price is not None and analysis.volatility_stop is not None:
-            analysis.stop_price = analysis.price - (analysis.volatility_stop * analysis.price)
+        # if analysis.price is not None and analysis.volatility_stop is not None:
+        #     analysis.stop_price = analysis.price - (analysis.volatility_stop * analysis.price)
         
         # Calculate limit offset
-        if analysis.stop_price is not None:
-            analysis.limit_offset = analysis.stop_price * 0.005
+        # if analysis.stop_price is not None:
+        #     analysis.limit_offset = analysis.stop_price * 0.005
         
         # Special processing for Max ROC
         if analysis.max_roc is not None:
