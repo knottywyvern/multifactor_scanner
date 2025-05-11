@@ -3,8 +3,8 @@
 # Development mode (set to true for more verbose logging)
 dev_mode: false
 
-# Number of days to look back for timeseries data (default: 882 days = ~3.5 years)
-timeseries_days_lookback: 882
+# Number of days to look back for timeseries data (default: 3650 days = 10 years)
+timeseries_days_lookback: 3650
 
 # Default index to use if none specified
 default_index: "DIA.US"

@@ -154,13 +154,14 @@ async def get_fundamental_data_async(tickers, token):
     display_log(f"Retrieved fundamental data for {len(results)} tickers.")
     return results
 
-def get_timeseries_data(ticker, token):
+def get_timeseries_data(ticker, token, days_lookback=3650):
     """
     Fetch timeseries data for a ticker.
     
     Args:
         ticker (str): Ticker symbol
         token (str): API token
+        days_lookback (int): Number of days to look back
         
     Returns:
         pandas.DataFrame: Timeseries data
@@ -168,7 +169,9 @@ def get_timeseries_data(ticker, token):
     display_log(f"Getting {ticker} timeseries data.")
     import datetime as dt
     current_date = dt.datetime.today()
-    timeseries_days_lookback = 882  # 3.5 year look back
+    
+    # Use provided days_lookback parameter (defaults to 10 years)
+    timeseries_days_lookback = days_lookback
     timeseries_start_date = current_date - dt.timedelta(days=timeseries_days_lookback)
     grab_start_date = timeseries_start_date.strftime("%Y-%m-%d")
     
