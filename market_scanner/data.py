@@ -98,6 +98,8 @@ class TickerAnalysis:
     std_dev: Optional[float] = None
     sharpe_ratio: Optional[float] = None
     sortino_ratio: Optional[float] = None
+    sum_three_largest_drawdown: Optional[float] = None # Sum of durations of 3 largest drawdown periods
+    actual_timeseries_start_date: Optional[str] = None # Actual start date of data used for 10yr metrics
     
     # Standardized scores
     z_scores: Dict[str, float] = field(default_factory=dict)
@@ -137,11 +139,13 @@ class TickerAnalysis:
             # New financial metrics
             "CAGR 10yr fct": self.cagr,
             "Longest Drawdown fct": self.longest_drawdown,
+            "Sum 3 Largest Drawdown fct": self.sum_three_largest_drawdown,
             "Max Drawdown 10yr fct": self.max_drawdown,
             "Calmar Ratio 10yr fct": self.calmar_ratio,
             "Std Dev 10yr fct": self.std_dev,
             "Sharpe Ratio 10yr fct": self.sharpe_ratio,
             "Sortino Ratio 10yr fct": self.sortino_ratio,
+            "Actual Timeseries Start Date": self.actual_timeseries_start_date,
         }
         
         # Add derived values if available

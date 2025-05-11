@@ -157,6 +157,7 @@ def calculate_financial_metrics(ticker, stock_price_data, riskfree_rate):
             return None
             
         adj_close = price_data["Adjusted_close"]
+        actual_start_date = adj_close.index[0].strftime('%Y-%m-%d') if not adj_close.empty else None
 
         # Calculate daily returns (assuming daily data for now, might need adjustment for weekly)
         # Assuming data is sorted by date
@@ -217,6 +218,16 @@ def calculate_financial_metrics(ticker, stock_price_data, riskfree_rate):
         if in_drawdown: # Check if still in drawdown at the end of the series
             longest_drawdown_duration = max(longest_drawdown_duration, current_drawdown_duration)
         
+        # Sum of durations of the three largest drawdown periods
+        drawdown_df = pd.DataFrame({'drawdown': drawdown, 'in_drawdown': drawdown < 0})
+        drawdown_df['drawdown_group'] = (drawdown_df['in_drawdown'] != drawdown_df['in_drawdown'].shift(1)).cumsum()
+        drawdown_periods_durations = []
+        if drawdown_df['in_drawdown'].any():
+            drawdown_periods_durations = drawdown_df[drawdown_df['in_drawdown']].groupby('drawdown_group').size().tolist()
+        
+        drawdown_periods_durations.sort(reverse=True)
+        sum_three_largest_drawdown = sum(drawdown_periods_durations[:3]) if drawdown_periods_durations else 0
+
         # Calmar Ratio
         # Use annualized CAGR. If num_years < 1, CAGR can be very large or misleading.
         # For Calmar, typically use CAGR over at least 3 years. Here we use the 10-year CAGR.
@@ -230,6 +241,8 @@ def calculate_financial_metrics(ticker, stock_price_data, riskfree_rate):
             "std_dev": std_dev,
             "sharpe_ratio": sharpe_ratio,
             "sortino_ratio": sortino_ratio,
+            "sum_three_largest_drawdown": sum_three_largest_drawdown,
+            "actual_timeseries_start_date": actual_start_date,
         }
 
     except Exception as e:
@@ -707,6 +720,8 @@ def analyze_ticker(ticker, fund_data, eod_data, riskfree_rate_table, region_data
                 analysis.std_dev = financial_metrics.get("std_dev")
                 analysis.sharpe_ratio = financial_metrics.get("sharpe_ratio")
                 analysis.sortino_ratio = financial_metrics.get("sortino_ratio")
+                analysis.sum_three_largest_drawdown = financial_metrics.get("sum_three_largest_drawdown")
+                analysis.actual_timeseries_start_date = financial_metrics.get("actual_timeseries_start_date")
             else:
                 # Set defaults if metrics calculation fails or returns None
                 logging.warning(f"Using default financial metrics for {ticker}")
@@ -717,6 +732,8 @@ def analyze_ticker(ticker, fund_data, eod_data, riskfree_rate_table, region_data
                 analysis.std_dev = np.nan
                 analysis.sharpe_ratio = np.nan
                 analysis.sortino_ratio = np.nan
+                analysis.sum_three_largest_drawdown = np.nan
+                analysis.actual_timeseries_start_date = None # or pd.NaT if you prefer for dates
         except Exception as e:
             logging.error(f"Error calculating financial metrics for {ticker}: {e}")
             analysis.cagr = np.nan
@@ -726,6 +743,8 @@ def analyze_ticker(ticker, fund_data, eod_data, riskfree_rate_table, region_data
             analysis.std_dev = np.nan
             analysis.sharpe_ratio = np.nan
             analysis.sortino_ratio = np.nan
+            analysis.sum_three_largest_drawdown = np.nan
+            analysis.actual_timeseries_start_date = None # or pd.NaT
             
         return analysis
     except Exception as e:
