@@ -241,8 +241,8 @@ async def main():
         logger.info(f"Saved results to {output_file}")
         
         # Save a copy as output.csv
-        current_output = os.path.join(output_dir, "output.csv")
-        result_df.to_csv(current_output, index=False)
+        #current_output = os.path.join(output_dir, "output.csv")
+        #result_df.to_csv(current_output, index=False)
         
         # Check if required columns exist
         required_columns = ["Ticker", "Security Type fct"]
